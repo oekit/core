@@ -8,7 +8,7 @@ func TestRandomHexLengthAndCharset(t *testing.T) {
 		t.Fatalf("16 字节应为 32 hex 字符，得到 %d", len(s))
 	}
 	for _, c := range s {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Fatalf("非 hex 字符 %q", c)
 		}
 	}

@@ -78,7 +78,7 @@ func TestDoContextCanceledDuringBackoff(t *testing.T) {
 
 func TestDoZeroConfigRunsOnce(t *testing.T) {
 	calls := 0
-	if err := Do(nil, Config{}, func(attempt int) error { calls++; return nil }); err != nil {
+	if err := Do(context.Background(), Config{}, func(attempt int) error { calls++; return nil }); err != nil {
 		t.Fatalf("零值配置应执行一次成功：%v", err)
 	}
 	if calls != 1 {

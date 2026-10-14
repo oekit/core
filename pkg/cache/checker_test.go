@@ -25,7 +25,7 @@ func TestCheckCachesSuccess(t *testing.T) {
 }
 
 func TestCheckFailShortTTL(t *testing.T) {
-	var now time.Time = time.Now()
+	now := time.Now()
 	fail := true
 	calls := 0
 	c := NewChecker(func(ctx context.Context) error {

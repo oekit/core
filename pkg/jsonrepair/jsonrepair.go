@@ -196,6 +196,7 @@ func Normalize(raw json.RawMessage, schema *Schema) (string, error) {
 	walkNormalize(m, schema)
 	out, err := json.Marshal(m)
 	if err != nil {
+		//nolint:nilerr // 宽容修复链永不失败：重序列化异常时回退原文，设计语义
 		return string(raw), nil
 	}
 	return string(out), nil
