@@ -20,7 +20,7 @@ func TestTruncRunes(t *testing.T) {
 }
 
 func TestTruncBytesRuneAligned(t *testing.T) {
-	s := "技能名字很长" // 每字 3 字节
+	s := "技能名字很长"                      // 每字 3 字节
 	out, truncated := TruncBytes(s, 4) // 预算落在第 2 字内 → 回退到 3 字节边界
 	if !truncated || out != "技" {
 		t.Fatalf("out=%q truncated=%v（应回退到完整 rune 边界）", out, truncated)
