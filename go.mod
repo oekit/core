@@ -6,7 +6,6 @@ require (
 	github.com/cloudwego/hertz v0.10.6
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/google/uuid v1.6.0
-	golang.org/x/time v0.15.0
 )
 
 require (
