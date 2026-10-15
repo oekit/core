@@ -21,7 +21,7 @@ go get github.com/oekit/core@v0.3.2
 
 > pkg/* 已在 Round-4 微库化，各自独立成仓：[ekit-errors](https://github.com/oekit/pkg/errors)、[ekit-validator](https://github.com/oekit/pkg/validator)、[ekit-stringx](https://github.com/oekit/pkg/stringx)、[ekit-slicex](https://github.com/oekit/pkg/slicex)、[ekit-enumx](https://github.com/oekit/pkg/enumx)、[ekit-convert](https://github.com/oekit/pkg/convert)、[ekit-encoding](https://github.com/oekit/pkg/encoding)、[ekit-jsonrepair](https://github.com/oekit/pkg/jsonrepair)、[ekit-httpjson](https://github.com/oekit/pkg/httpjson)、[ekit-mathx](https://github.com/oekit/pkg/mathx)、[ekit-pathx](https://github.com/oekit/pkg/pathx)、[ekit-pagination](https://github.com/oekit/pkg/pagination)、[ekit-ptrx](https://github.com/oekit/pkg/ptrx)、[ekit-timex](https://github.com/oekit/pkg/timex)、[ekit-uidgen](https://github.com/oekit/pkg/uidgen)、[ekit-cache](https://github.com/oekit/pkg/cache)。
 
-## 矩阵总览（22 活跃模块，自动生成）
+## 矩阵总览（23 活跃模块，自动生成）
 
 | 模块 | 内容 | 矩阵内依赖 |
 |---|---|---|
@@ -37,6 +37,7 @@ go get github.com/oekit/core@v0.3.2
 | [gorm](https://github.com/oekit/gorm) | SQL/GORM 全家——连接池增强、框架无关 CRUD Service、仓储 | [logx](https://github.com/oekit/logx)、[pkg](https://github.com/oekit/pkg) |
 | [redis](https://github.com/oekit/redis) | Redis 全家——客户端封装、缓存后端、分布式锁 | [concurrency](https://github.com/oekit/concurrency)、[data](https://github.com/oekit/data)、[logx](https://github.com/oekit/logx) |
 | [httpx](https://github.com/oekit/httpx) | HTTP 客户端 + 负载均衡——服务发现/熔断/重试/指标/OTel 透传 | [concurrency](https://github.com/oekit/concurrency)、[core](https://github.com/oekit/core)、[logx](https://github.com/oekit/logx)、[metrics](https://github.com/oekit/metrics)、[registry](https://github.com/oekit/registry)、[tracing](https://github.com/oekit/tracing) |
+| [network](https://github.com/oekit/network) | 轻量网络客户端——WebSocket/NATS/MQ 抽象、连接与流工具、Octopus 推送 | [concurrency](https://github.com/oekit/concurrency)、[logx](https://github.com/oekit/logx)、[tracing](https://github.com/oekit/tracing) |
 | [timertask](https://github.com/oekit/timertask) | 分片定时任务（FNV-1a、心跳续约） | [concurrency](https://github.com/oekit/concurrency)、[logx](https://github.com/oekit/logx) |
 | [middleware](https://github.com/oekit/middleware) | Hertz 自研标准中间件栈 + contrib 桥接 + hmw | [concurrency](https://github.com/oekit/concurrency)、[core](https://github.com/oekit/core)、[logx](https://github.com/oekit/logx)、[metrics](https://github.com/oekit/metrics)、[pkg](https://github.com/oekit/pkg)、[registry](https://github.com/oekit/registry)、[tracing](https://github.com/oekit/tracing) |
 | [nns](https://github.com/oekit/nns) | NNS 服务治理客户端——provider 无关发现/配置/实例缓存 | [concurrency](https://github.com/oekit/concurrency)、[core](https://github.com/oekit/core)、[logx](https://github.com/oekit/logx)、[registry](https://github.com/oekit/registry) |
