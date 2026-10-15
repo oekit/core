@@ -1,10 +1,10 @@
 # AGENTS.md — oekit/core
 
 > 应用基建件：governance 治理 schema、lifecycle 契约、network IP 工具、version
-> 当前版本：`v0.3.2` · module：`github.com/oekit/core` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.4.0` · module：`github.com/oekit/core` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
-`governance/`、`lifecycle/`、`network/`、`version/`
+`config/`、`governance/`、`lifecycle/`、`network/`、`version/`
 
 ## 硬规则速览（全矩阵适用）
 
