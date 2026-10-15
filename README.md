@@ -13,15 +13,26 @@
 go get github.com/oekit/core@v0.3.2
 ```
 
-## 快速使用
+## 能做什么
 
+- **governance**：治理配置模板 schema（retry/timeout/circuit_breaker/limiter），`Parse` fail-closed
+- **lifecycle**：`App` 生命周期契约（hertz/kitex RunServer 的统一抽象）
+- **network**：`GetPodIP`/`IsPublicIP` 等注册地址解析工具
+- **version**：ldflags 注入的构建元信息
+
+## 使用示例
+
+### 治理配置解析（配 middleware/kitex 动态限流超时）
+```go
+import "github.com/oekit/core/governance"
+
+cfg, err := governance.Parse(data) // 非法值 fail-closed
+```
+### 版本元信息
 ```go
 import "github.com/oekit/core/version"
 
-md := version.Metadata() // ldflags 注入的版本信息
-import "github.com/oekit/core/governance" // 治理配置 schema + Parse/Store
-```
-
+md := version.Metadata() // version/commit/build_time（-ldflags 注入）
 ## 包清单
 
 - `governance/` — 治理配置模板 schema（retry/timeout/circuit_breaker/limiter，JSON + Nacos 友好）
