@@ -21,7 +21,7 @@ go get github.com/oekit/core@v0.4.0
 | 包 | 做什么 |
 |---|---|
 | `governance` | 治理配置模板 schema（retry/timeout_ms/circuit_breaker/limiter）+ `Parse`/`Store`。JSON 形态对 Nacos 友好，hertz/kitex 两侧共用 |
-| `config` | 配置文件加载：`LoadBootstrap[T]`（YAML + `${VAR}` 占位符展开）、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
+| `config` | 配置文件加载：`LoadBootstrap[T]`（YAML + `${VAR}` 占位符展开 + struct tag `default`/`env`/`range`/`options`）、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
 | `lifecycle` | transport 生命周期契约（`App` 接口）：hertz/kitex 的 `RunServer` 面向它编程 |
 | `network` | IP 工具：`GetPodIP`（K8s POD_IP 感知）、`IsPublicIP`——注册地址解析的公共依赖 |
 | `version` | 版本信息（ldflags 注入 `Metadata()`） |

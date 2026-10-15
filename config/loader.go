@@ -33,6 +33,10 @@ func expandEnv(data []byte) []byte {
 // LoadBootstrap reads a local YAML config file, expands ${VAR} and ${VAR:default}
 // environment variable placeholders, and unmarshals it into the provided struct type T.
 //
+// After unmarshal, the struct tag passes run in order ApplyEnv → FillDefaults →
+// ValidateTags (precedence: explicit yaml value > env tag > default tag; see
+// tags.go for the supported tags). Non-struct config types skip the tag passes.
+//
 // Lookup order:
 //  1. etc/config.yaml — used in Docker images (renamed from config-{env}.yaml at build time)
 //  2. etc/config-{envFlag}.yaml — used in local development (envFlag = "dev", "local", "prod")
@@ -52,6 +56,9 @@ func LoadBootstrap[T any](envFlag string) (*T, error) {
 	var cfg T
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", filename, err)
+	}
+	if err := applyTagPasses(&cfg); err != nil {
+		return nil, fmt.Errorf("apply struct tags for config file %s: %w", filename, err)
 	}
 	return &cfg, nil
 }
