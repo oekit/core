@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.7.0] — 2026-10-17
+
+### Added（go-kratos 对齐）
+- `transport` 新包：协议无关传输层上下文抽象——`Transporter`（Kind/Endpoint/Operation/RequestHeader/ReplyHeader）、`Header`、`MapHeader`/`NoopHeader`、Server/Client ctx 存取；仅标准库，中间件/日志/trace 透传可一份实现跨 hertz/kitex 复用
+- `chain` 新包：transport 无关中间件链——`Handler`/`Middleware`/`Chain`/`Finalize` + `Recovery`（PanicError + 可选上报钩子）/ `Timeout`；仅标准库，与 nns-endpoint.Endpoint、go-kratos Handler 同形
+- `config.OverlaySource`：多 ConfigSource 组合（按序 JSON 深合并，后者覆盖前者；任一子源变化即触发 onChange），配合 `ConfigWatcher[T]` 实现多源热更新
 ## [Unreleased]
 
 ### Added
