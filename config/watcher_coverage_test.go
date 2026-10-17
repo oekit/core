@@ -172,4 +172,3 @@ func (w *watchErrorSource) Watch(ctx context.Context, onChange func()) {
 	}()
 	<-ctx.Done()
 }
-
