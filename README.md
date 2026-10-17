@@ -22,7 +22,7 @@ go get github.com/oekit/core@v0.5.0
 |---|---|
 | `governance` | 治理配置模板 schema（retry/timeout_ms/circuit_breaker/limiter）+ `Parse`/`Store`。JSON 形态对 Nacos 友好，hertz/kitex 两侧共用 |
 | `config` | 配置文件加载：`LoadBootstrap[T]`（YAML + `${VAR}` 占位符展开 + struct tag `default`/`env`/`range`/`options`）、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
-| `lifecycle` | transport 生命周期契约（`App` 接口）：hertz/kitex 的 `RunServer` 面向它编程 |
+| `lifecycle` | 应用生命周期：`App` 契约（hertz/kitex 的 `RunServer` 面向它编程）+ `Manager` 优雅关停（closer/teardown/drain/信号） |
 | `network` | IP 工具：`GetPodIP`（K8s POD_IP 感知）、`IsPublicIP`——注册地址解析的公共依赖 |
 | `version` | 版本信息（ldflags 注入 `Metadata()`） |
 
@@ -60,7 +60,7 @@ config.LoadDotEnv(".env")                         // 可选：本地 .env
 | [pkg](https://github.com/oekit/pkg) | 微工具集 21 合 1（errors/bloomx/contextx/collectionx/validator/stringx/slicex/enumx/convert/encoding/jsonrepair/httpjson/mathx/pathx/pagination/ptrx/timex/uidgen/cache/bufiox/strmap）；cache（v0.4.0 起）含缓存接口 CacheAside + BatchGetter 批量能力（MGet）+ LocalCache/SingleFlightCache + cachetest 契约 + Checker；collectionx（v0.5.0 起）泛型容器 Set/Ring/Queue/SafeMap；timex/stringx（v0.7.0 起）时间段边界 BeginningOf/EndOf 七对（分/时/日/周/月/季/年，周起始显式参数）+ trie 多模式替换器 Replacer（最长匹配）/ NewMask 敏感词遮罩 | — |
 | [concurrency](https://github.com/oekit/concurrency) | 并发与流控原语（async/gopool/group/singleflight/progress/syncx/ratelimit/retry）+ window 滑动窗口 / breaker 自适应熔断（规范哨兵 ErrCircuitOpen）/ shedding CPU 自适应降载 / batch 攒批执行器（满条数/满字节/窗口去重）/ timewheel 单级时间轮 | — |
 | [logx](https://github.com/oekit/logx) | 统一日志门面（多后端可替换 + Sink + caller 归属）+ 优雅关停；桥接子包 hlog/hertzlog/kitexlog 为嵌套模块按需引入 | — |
-| [core](https://github.com/oekit/core) | 应用基建件（governance 治理 schema / config 配置加载 + default/env/range/options tag 校验 / lifecycle 契约 / network IP 工具 / version） | [logx](https://github.com/oekit/logx) |
+| [core](https://github.com/oekit/core) | 应用基建件（governance 治理 schema / config 配置加载 + default/env/range/options tag 校验 / lifecycle 契约 + Manager / network IP 工具 / version） | — |
 | [metrics](https://github.com/oekit/metrics) | Prometheus 门面 + 弹性指标族 | [core](https://github.com/oekit/core) |
 | [tracing](https://github.com/oekit/tracing) | OpenTelemetry 追踪 + trace_id 真相源 | [logx](https://github.com/oekit/logx) |
 | [registry](https://github.com/oekit/registry) | 注册发现核心 + Nacos 实现 + Nacos 配置源 + sdbridge | [core](https://github.com/oekit/core)、[logx](https://github.com/oekit/logx) |

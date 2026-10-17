@@ -4,36 +4,52 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/oekit/logx"
 )
 
-// captureLogger is a Logger implementation that records error calls.
-// 仅实现 Error：watcher 只会调用 Error，其余方法由嵌入接口占位（不会被调用）。
-type captureLogger struct {
-	logx.Logger
+// captureHandler 记录 error 级日志，经 slog.Logger 注入 ConfigWatcher。
+type captureHandler struct {
 	mu     sync.Mutex
 	calls  []string
 	fields [][]any
 }
 
-func (l *captureLogger) Error(msg string, keysAndValues ...any) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.calls = append(l.calls, msg)
-	l.fields = append(l.fields, keysAndValues)
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level < slog.LevelError {
+		return nil
+	}
+	var kv []any
+	r.Attrs(func(a slog.Attr) bool {
+		kv = append(kv, a.Key, a.Value.Any())
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, r.Message)
+	h.fields = append(h.fields, kv)
+	return nil
 }
 
-func (l *captureLogger) lastMessage() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.calls) == 0 {
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) lastMessage() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.calls) == 0 {
 		return ""
 	}
-	return l.calls[len(l.calls)-1]
+	return h.calls[len(h.calls)-1]
+}
+
+func newCaptureLogger() (*slog.Logger, *captureHandler) {
+	h := &captureHandler{}
+	return slog.New(h), h
 }
 
 // errSource is a ConfigSource whose Read always fails.
@@ -50,15 +66,15 @@ func TestConfigWatcher_SetLogger(t *testing.T) {
 	}
 	watcher := NewConfigWatcher(source, parser)
 
-	cap := &captureLogger{}
-	watcher.SetLogger(cap)
+	capLog, _ := newCaptureLogger()
+	watcher.SetLogger(capLog)
 
 	// Verify SetLogger accepts the new logger (and Start uses it on
 	// subsequent Watch-triggered reload failures — see
 	// TestConfigWatcher_Watch_ReloadFailure).
 	failSrc := errSource{}
 	watcher2 := NewConfigWatcher(failSrc, parser)
-	watcher2.SetLogger(cap)
+	watcher2.SetLogger(capLog)
 	_ = watcher2
 	_ = watcher
 	_ = source
@@ -112,8 +128,8 @@ func TestConfigWatcher_Watch_ReloadFailure(t *testing.T) {
 	}
 	watcher := NewConfigWatcher(source, parser)
 
-	cap := &captureLogger{}
-	watcher.SetLogger(cap)
+	capLog, capt := newCaptureLogger()
+	watcher.SetLogger(capLog)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -124,12 +140,12 @@ func TestConfigWatcher_Watch_ReloadFailure(t *testing.T) {
 	// Wait for the onChange callback to fire.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if cap.lastMessage() != "" {
+		if capt.lastMessage() != "" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if cap.lastMessage() == "" {
+	if capt.lastMessage() == "" {
 		t.Error("expected logger to receive error from watch-driven reload failure")
 	}
 }
@@ -157,4 +173,3 @@ func (w *watchErrorSource) Watch(ctx context.Context, onChange func()) {
 	<-ctx.Done()
 }
 
-var _ = sync.Mutex{} // keep sync import for captureLogger use

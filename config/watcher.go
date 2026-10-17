@@ -2,10 +2,9 @@ package config
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
-
-	"github.com/oekit/logx"
 )
 
 // ConfigSource 是配置源接口。
@@ -29,11 +28,11 @@ type ConfigWatcher[T any] struct {
 	// dispatchMu 串行化 Reload 的 Swap+回调投递：并发 Reload（手动触发与
 	// Watch 回调同时到）曾可能乱序投递，消费方把旧配置当最新应用。
 	dispatchMu sync.Mutex
-	loggerV    atomic.Pointer[logx.Logger]
+	loggerV    atomic.Pointer[slog.Logger]
 }
 
 // logger 返回当前 logger(atomic 加载)。
-func (w *ConfigWatcher[T]) logger() logx.Logger { return *w.loggerV.Load() }
+func (w *ConfigWatcher[T]) logger() *slog.Logger { return w.loggerV.Load() }
 
 // NewConfigWatcher 创建配置监听器。
 //
@@ -41,20 +40,21 @@ func (w *ConfigWatcher[T]) logger() logx.Logger { return *w.loggerV.Load() }
 //   - source: 配置源（如文件、Nacos——见 nacos.NewConfigSource）
 //   - parser: 配置解析函数（如 YAML 解析）
 func NewConfigWatcher[T any](source ConfigSource, parser func([]byte) (*T, error)) *ConfigWatcher[T] {
-	l := logx.Delegating("config-watcher")
 	w := &ConfigWatcher[T]{
 		source: source,
 		parser: parser,
 	}
-	w.loggerV.Store(&l)
+	w.loggerV.Store(slog.Default().With("component", "config-watcher"))
 	return w
 }
 
 // SetLogger 设置自定义日志记录器。
 // 任意时刻可调:logger 经 atomic.Pointer 保护(2026-09-06 复审修复,
 // 原实现无锁写,Start 后 Watch 回调 goroutine 并发读构成数据竞争)。
-func (w *ConfigWatcher[T]) SetLogger(l logx.Logger) {
-	w.loggerV.Store(&l)
+func (w *ConfigWatcher[T]) SetLogger(l *slog.Logger) {
+	if l != nil {
+		w.loggerV.Store(l)
+	}
 }
 
 // Get 获取当前配置。

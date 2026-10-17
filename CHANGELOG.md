@@ -2,6 +2,21 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [Unreleased]
+
+### Added
+- `lifecycle.Manager`：优雅关停资源管理器（自 [oekit/logx](https://github.com/oekit/logx) `logx/shutdown`
+  迁入，与 `lifecycle.App` 契约同域）。注册 closer/teardown、信号监听、
+  Drain 引用计数、per-job 超时、panic 隔离、`Errors()` 观测；`WithLogger`
+  注入宿主 `*slog.Logger`。默认日志走 stdlib slog（component=shutdown），
+  **lifecycle 包零外部依赖**
+  （[oekit#1](https://github.com/oekit/oekit/issues/1)）
+
+### Changed
+- **breaking**：`config.ConfigWatcher` 日志接口改为 `*slog.Logger`（原 `logx.Logger`），
+  `SetLogger(*slog.Logger)`。core 模块自此**不再依赖 logx**，消除 L0→L1 反向依赖
+  （[oekit#1](https://github.com/oekit/oekit/issues/1)）
+
 ## [v0.5.0] — 2026-10-16
 
 ### Added
