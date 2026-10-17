@@ -82,3 +82,25 @@ func deepMergeMaps(a, b map[string]any) map[string]any {
 	}
 	return a
 }
+
+// ApplyEnvOverlay 把环境变量解析到独立的 overlay 并覆盖 dst（#2）：
+// 与 ApplyEnv（只填零值字段，「yaml 显式值优先」）语义相反——本函数实现
+// 「env 优先于配置文件」的 12-factor 场景（Helm/docker-compose 靠 env 传配置）。
+//
+// 等价手写：
+//
+//	overlay := &T{}
+//	_ = ApplyEnv(overlay)        // 空结构体上解 env → env 非零值进入 overlay
+//	OverlayMerge(dst, overlay)   // overlay 的非零值压过 dst（文件值）
+//
+// env 未设置的字段不影响 dst（overlay 对应字段为零值，OverlayMerge 跳过）。
+// 注意：OverlayMerge 是「非零值才覆盖」，env 显式配置零值（如 APP_PORT=0）
+// 无法把文件里的非零值清成零——零值歧义与 ApplyEnv 一致，见 tags.go 文档。
+func ApplyEnvOverlay[T any](dst *T) error {
+	var overlay T
+	if err := ApplyEnv(&overlay); err != nil {
+		return err
+	}
+	OverlayMerge(dst, &overlay)
+	return nil
+}

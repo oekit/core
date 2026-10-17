@@ -2,6 +2,8 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [- feat(config): `ApplyEnvOverlay[T](dst *T)`——「env 优先于配置文件」的 12-factor 形态（#2：ApplyEnv 只填零值、yaml 优先，两者语义相反且此前未文档化）；LoadBootstrap 文档补优先级警告
+
 ## [v0.7.0] — 2026-10-17
 
 ### Added（go-kratos 对齐）
