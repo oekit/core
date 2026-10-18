@@ -83,14 +83,30 @@ func markSetFromYAML(v reflect.Value, node any, path string, set FieldSet) {
 		if !sf.IsExported() {
 			continue
 		}
-		key := yamlKey(sf)
-		if key == "" {
-			continue
-		}
 		fv := v.Field(i)
 		fpath := sf.Name
 		if path != "" {
 			fpath = path + "." + sf.Name
+		}
+		// yaml ",inline"：子字段与父结构体共用同一映射。通用 map 解码下 inline
+		// 子字段被拍平到父级，按字段名取 key 在 m 里永远 miss——须以**同一 node**
+		// 继续下推（含 nil 的 *struct 用零值仅作类型下推，不写入）。
+		if yamlInline(sf) {
+			switch {
+			case sf.Type.Kind() == reflect.Struct:
+				markSetFromYAML(fv, node, fpath, set)
+			case sf.Type.Kind() == reflect.Pointer && sf.Type.Elem().Kind() == reflect.Struct:
+				if !fv.IsNil() {
+					markSetFromYAML(fv.Elem(), node, fpath, set)
+				} else {
+					markSetFromYAML(reflect.New(sf.Type.Elem()).Elem(), node, fpath, set)
+				}
+			}
+			continue
+		}
+		key := yamlKey(sf)
+		if key == "" {
+			continue
 		}
 		child, ok := m[key]
 		if !ok {
@@ -158,6 +174,20 @@ func yamlKey(sf reflect.StructField) string {
 		return strings.ToLower(sf.Name)
 	}
 	return name
+}
+
+// yamlInline 报告字段是否带 `yaml:",inline"` 选项。
+func yamlInline(sf reflect.StructField) bool {
+	tag, ok := sf.Tag.Lookup("yaml")
+	if !ok {
+		return false
+	}
+	for _, opt := range strings.Split(tag, ",")[1:] {
+		if opt == "inline" {
+			return true
+		}
+	}
+	return false
 }
 
 // derivedEnvName 由 yaml key（缺省则字段名）推导「约定 env 名」：

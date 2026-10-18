@@ -2,6 +2,15 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.9.1] — 2026-10-18
+
+### Fixed
+- `FieldSetFromYAML` / `ApplyTagPasses` 支持 `yaml:",inline"` 字段：通用 map 解码会把
+  inline 子字段拍平到父级映射，而 inline 字段按字段名小写取 key、在父映射里永远查不到——
+  inline 叶子的显式零值（`region: ""` / `shards: 0`）仍被 default 覆盖，恰是 FieldSet
+  要消灭的那类静默错（v0.9.0 引入的缺口）。修复：以**同一映射**继续下推 inline 结构体
+  （含 nil 的 `*struct` 按类型下推，不写入），叶子路径正常标记；3 例回归测试钉住
+
 ## [v0.9.0] — 2026-10-18
 
 ### Added
