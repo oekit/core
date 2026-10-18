@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/core@v0.8.0
+go get github.com/oekit/core@v0.9.0
 ```
 
 ## 这个仓库做什么
@@ -21,7 +21,7 @@ go get github.com/oekit/core@v0.8.0
 | 包 | 做什么 |
 |---|---|
 | `governance` | 治理配置模板 schema（retry/timeout_ms/circuit_breaker/limiter）+ `Parse`/`Store`。JSON 形态对 Nacos 友好，hertz/kitex 两侧共用 |
-| `config` | 配置文件加载：`LoadBootstrap[T]`（YAML + `${VAR}` 占位符展开 + struct tag `default`/`env`/`range`/`options`）、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
+| `config` | 配置文件加载：`LoadBootstrap[T]`（YAML + `${VAR}` 占位符展开 + struct tag `default`/`env`/`range`/`options`/`required`；yaml/env 显式零值不被 default 覆盖——`ExplicitFields` 来源标记，无需指针化）、`CheckEnvOrphans` 启动期抓 env tag 拼错、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
 | `lifecycle` | 应用生命周期：`App` 契约（hertz/kitex 的 `RunServer` 面向它编程）+ `Manager` 优雅关停（closer/teardown/drain/信号） |
 | `network` | IP 工具：`GetPodIP`（K8s POD_IP 感知）、`IsPublicIP`——注册地址解析的公共依赖 |
 | `version` | 版本信息（ldflags 注入 `Metadata()`） |

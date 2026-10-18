@@ -15,15 +15,30 @@ var durationType = reflect.TypeOf(time.Duration(0))
 
 // targetTagNames 是本包支持的独立结构体 tag 集合（与 yaml/merge tag 互不冲突），
 // 供按需分配深层 *struct 时快速判断"该结构体里有没有值得填充的字段"。
-var targetTagNames = [...]string{"default", "env", "range", "options"}
+var targetTagNames = [...]string{"default", "env", "range", "options", "required"}
 
 // FillDefaults 依据 default tag 为零值字段填充默认值，非零字段一律不动。
 //
 // 优先级约定（与 LoadBootstrap 内 ApplyEnv → FillDefaults 的接线顺序配合）：
 // yaml 显式值 > env tag > default tag。
 //
-// ⚠️ 零值歧义：字段当前的 0/""/false/空切片与"未设置"对反射不可区分，yaml 里
-// 显式写 `port: 0` 同样会被 default 覆盖（设计如此；需要区分请用指针类型）。
+// # 零值歧义与消解（#5）
+//
+// 单看字段值，0/""/false/空切片与"未设置"对反射不可区分。不带选项调用时沿用
+// 「零值即未设置」判定：yaml 显式写 `port: 0` 会被 default 覆盖。要区分二者，
+// 把来源信息传进来——WithExplicit(ExplicitFields)：集合内字段即便为零值也不填。
+// LoadBootstrap 已自动采集（yaml 出现的键 + 已设置的 env），调用方零改动；自建
+// 加载流程用 ExplicitFromYAML / ExplicitFromEnv 采集后传入：
+//
+//	explicit, _ := config.ExplicitFromYAML(data, &cfg)
+//	envSet, _ := config.ExplicitFromEnv(&cfg)
+//	_ = config.ApplyEnv(&cfg, config.WithExplicit(explicit))
+//	explicit.Merge(envSet)
+//	_ = config.FillDefaults(&cfg, config.WithExplicit(explicit))
+//
+// 指针类型（*int/*bool）也能区分，但只适合少量字段；整份配置都要区分时改指针会让
+// 每个消费方多写解引用、配置可读性塌掉——用上面的来源标记，或把「必须外部提供、
+// 不吃 default」的字段标 `required:"true"`（见 CheckRequired）。
 //
 // 支持类型：string、int*/uint*/float*、bool、time.Duration（time.ParseDuration
 // 文法，如 "5s"）、[]string（逗号切分，元素去首尾空格并丢弃空元素）；标量值
@@ -33,12 +48,13 @@ var targetTagNames = [...]string{"default", "env", "range", "options"}
 // 继续填充）、[]struct / []*struct（仅已存在的元素）；不遍历 map，跳过非导出字段。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
-func FillDefaults(v any) error {
+func FillDefaults(v any, opts ...PassOption) error {
 	rv, err := targetStructValue(v, "FillDefaults")
 	if err != nil {
 		return err
 	}
-	if err := walkTaggedStruct(rv, "", true, fillDefaultField); err != nil {
+	pc := newPassConfig(opts)
+	if err := walkTaggedStruct(rv, "", true, fillDefaultVisitor(pc.explicit)); err != nil {
 		return fmt.Errorf("config: FillDefaults: %w", err)
 	}
 	return nil
@@ -48,24 +64,28 @@ func FillDefaults(v any) error {
 // 已有值（yaml 显式设置）不覆盖。
 //
 // 优先级约定：yaml 显式值 > env tag > default tag——LoadBootstrap 先 ApplyEnv 后
-// FillDefaults，env 填过的非零字段不会再被 default 覆盖。
+// FillDefaults，env 填过的非零字段不会再被 default 覆盖。传入 WithExplicit（yaml
+// 已显式出现的字段）时，这些字段即便为零值也不写 env——yaml 显式零值 > env，
+// 与上述优先级一致（不传则退回「零值即未设置」判定）。
 //
 // env 设为空串（或纯空白）视同未设置；env 值无法按字段类型解析时 fail-closed
 // 报错（错误信息携带字段路径与变量名）。支持类型与遍历范围同 FillDefaults。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
-func ApplyEnv(v any) error {
+func ApplyEnv(v any, opts ...PassOption) error {
 	rv, err := targetStructValue(v, "ApplyEnv")
 	if err != nil {
 		return err
 	}
-	if err := walkTaggedStruct(rv, "", true, applyEnvField); err != nil {
+	pc := newPassConfig(opts)
+	if err := walkTaggedStruct(rv, "", true, applyEnvVisitor(pc.explicit)); err != nil {
 		return fmt.Errorf("config: ApplyEnv: %w", err)
 	}
 	return nil
 }
 
-// ValidateTags 依据 range / options tag 做 fail-closed 校验，只读不写。
+// ValidateTags 依据 range / options tag 做 fail-closed 校验，只读不写；并顺带
+// 校验 env tag 文法（含空白或 '=' 的变量名永远匹配不到环境，属拼写错误）。
 //
 //   - range：仅数值字段（含 time.Duration，边界用 duration 文法如 "(0,30s]"）。
 //     文法：`[a,b]`/`(a,b)`/`[a,b)`/`(a,b]` 四种区间 + 单端开区间 `[a,)`/`(,b]`
@@ -73,9 +93,11 @@ func ApplyEnv(v any) error {
 //     错误信息携带字段路径（嵌套用 `.` 连接，切片元素用 `Items[1].Qty`）。
 //   - options：仅 string 字段的枚举校验；当前值（含空串）必须命中枚举之一，
 //     可选枚举字段请配合 default tag 给默认值。
+//   - env：变量名不得含空白或 '='。拼成另一个合法名字（BACKUP_ARCHIVE_ARCHIVE_FORMAT）
+//     静态查不出来——用 CheckEnvOrphans 在启动期按前缀抓「环境里有、没人消费」的孤儿变量。
 //
 // 与 FillDefaults/ApplyEnv 配合使用时放在最后（LoadBootstrap 接线顺序
-// ApplyEnv → FillDefaults → ValidateTags），校验的是填充后的最终值。
+// ApplyEnv → FillDefaults → CheckRequired → ValidateTags），校验的是填充后的最终值。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
 func ValidateTags(v any) error {
@@ -91,17 +113,31 @@ func ValidateTags(v any) error {
 }
 
 // applyTagPasses 是 LoadBootstrap 的接线点：yaml unmarshal 成功后依次执行
-// ApplyEnv → FillDefaults → ValidateTags（优先级 yaml 显式值 > env > default）。
+// ApplyEnv → FillDefaults → CheckRequired → ValidateTags（优先级 yaml 显式值 >
+// env > default）。data 为原始 yaml 文档，用于采集显式出现的字段（#5：yaml 显式
+// 零值不再被 env/default 覆盖）；env 已设置的字段同样记为显式，default 不再覆盖。
 // 非结构体配置类型（如 map）不适用 struct tag，直接跳过以保持既有行为。
-func applyTagPasses(cfg any) error {
+func applyTagPasses(cfg any, data []byte) error {
 	rv := reflect.ValueOf(cfg)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
 		return nil
 	}
-	if err := ApplyEnv(cfg); err != nil {
+	explicit, err := ExplicitFromYAML(data, cfg)
+	if err != nil {
 		return err
 	}
-	if err := FillDefaults(cfg); err != nil {
+	envSet, err := ExplicitFromEnv(cfg)
+	if err != nil {
+		return err
+	}
+	if err := ApplyEnv(cfg, WithExplicit(explicit)); err != nil {
+		return err
+	}
+	explicit.Merge(envSet)
+	if err := FillDefaults(cfg, WithExplicit(explicit)); err != nil {
+		return err
+	}
+	if err := CheckRequired(cfg, explicit); err != nil {
 		return err
 	}
 	return ValidateTags(cfg)
@@ -229,43 +265,58 @@ func typeHasTargetTags(t reflect.Type, seen map[reflect.Type]bool) bool {
 	return false
 }
 
-// fillDefaultField 是 FillDefaults 的单字段处理：有 default tag 且字段为零值
-// 时，按字段类型解析并写入。
-func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string) error {
-	def, ok := sf.Tag.Lookup("default")
-	if !ok || def == "" {
-		return nil
+// fillDefaultVisitor 返回 FillDefaults 的单字段处理：有 default tag 且字段为零值
+// 且未被来源显式提供时，按字段类型解析并写入。
+func fillDefaultVisitor(explicit ExplicitFields) func(reflect.StructField, reflect.Value, string) error {
+	return func(sf reflect.StructField, fv reflect.Value, path string) error {
+		def, ok := sf.Tag.Lookup("default")
+		if !ok || def == "" {
+			return nil
+		}
+		if !isZeroValue(fv) {
+			return nil // 已有显式值（yaml/env）不覆盖
+		}
+		if explicit.Has(path) {
+			return nil // 来源显式给了零值（yaml port: 0 / env X=0），不是"未设置"
+		}
+		return setScalarFromString(fv, def, fmt.Sprintf("default %q", def), path)
 	}
-	if !isZeroValue(fv) {
-		return nil // 已有显式值（yaml/env）不覆盖
-	}
-	return setScalarFromString(fv, def, fmt.Sprintf("default %q", def), path)
 }
 
-// applyEnvField 是 ApplyEnv 的单字段处理：env 已设置（非空）且字段为零值时，
-// 按字段类型解析环境变量值并写入。
-func applyEnvField(sf reflect.StructField, fv reflect.Value, path string) error {
-	name, ok := sf.Tag.Lookup("env")
-	if !ok || name == "" {
-		return nil
+// applyEnvVisitor 返回 ApplyEnv 的单字段处理：env 已设置（非空）且字段为零值
+// 且未被 yaml 显式提供时，按字段类型解析环境变量值并写入。
+func applyEnvVisitor(explicit ExplicitFields) func(reflect.StructField, reflect.Value, string) error {
+	return func(sf reflect.StructField, fv reflect.Value, path string) error {
+		name, ok := sf.Tag.Lookup("env")
+		if !ok || name == "" {
+			return nil
+		}
+		raw, ok := os.LookupEnv(name)
+		if !ok {
+			return nil
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil // 显式设为空串视同未设置
+		}
+		if !isZeroValue(fv) {
+			return nil // yaml 显式值优先
+		}
+		if explicit.Has(path) {
+			return nil // yaml 显式零值同样优先于 env
+		}
+		return setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", name, raw), path)
 	}
-	raw, ok := os.LookupEnv(name)
-	if !ok {
-		return nil
-	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil // 显式设为空串视同未设置
-	}
-	if !isZeroValue(fv) {
-		return nil // yaml 显式值优先
-	}
-	return setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", name, raw), path)
 }
 
-// validateTagFields 是 ValidateTags 的单字段处理：依次执行 range 与 options
-// 两类校验（二者按字段类型天然互斥，同时滥用会收到其中之一的类型错误）。
+// validateTagFields 是 ValidateTags 的单字段处理：依次执行 env 文法、range 与
+// options 三类校验（range/options 按字段类型天然互斥，同时滥用会收到其中之一的类型错误）。
 func validateTagFields(sf reflect.StructField, fv reflect.Value, path string) error {
+	if name, ok := sf.Tag.Lookup("env"); ok && name != "" {
+		if strings.ContainsAny(name, " \t\r\n=") {
+			return fmt.Errorf("field %q: invalid env tag %q (variable name must not contain whitespace or '=')", path, name)
+		}
+	}
 	if rng, ok := sf.Tag.Lookup("range"); ok && strings.TrimSpace(rng) != "" {
 		if err := validateRangeField(fv, rng, path); err != nil {
 			return err

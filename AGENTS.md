@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/core
 
 > 应用基建件——governance 治理 schema、config 配置加载（LoadBootstrap/LoadDotEnv/Get* 系、default/env/range/options tag 校验、OverlaySource 多源叠加热更、ApplyEnvOverlay env 优先 12-factor 形态）、transport 协议无关传输上下文（Transporter/Header/Server·Client ctx 存取，仅标准库）、chain 中间件链（Handler/Middleware/Chain/Recovery/Timeout，与 nns-endpoint.Endpoint 同形）、lifecycle 契约 + Manager 优雅关停（自 logx/shutdown 迁入，日志 *slog.Logger——core 不再依赖 logx）、network IP 工具、version
-> 当前版本：`v0.8.0` · module：`github.com/oekit/core` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.9.0` · module：`github.com/oekit/core` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `chain/`、`config/`、`governance/`、`lifecycle/`、`network/`、`transport/`、`version/`

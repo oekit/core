@@ -34,8 +34,13 @@ func expandEnv(data []byte) []byte {
 // environment variable placeholders, and unmarshals it into the provided struct type T.
 //
 // After unmarshal, the struct tag passes run in order ApplyEnv → FillDefaults →
-// ValidateTags (precedence: explicit yaml value > env tag > default tag; see
-// tags.go for the supported tags). Non-struct config types skip the tag passes.
+// CheckRequired → ValidateTags (precedence: explicit yaml value > env tag > default
+// tag; see tags.go for the supported tags). Non-struct config types skip the tag passes.
+//
+// 零值歧义（#5）在此已消解：yaml 文档里显式出现的键（`port: 0` 也算；`port: ~`
+// 不算）与已设置的 env 变量都记为「显式提供」——这些字段即便是零值也不再被
+// env/default 覆盖，无需把配置字段改成指针。`required:"true"` 的字段必须由 yaml
+// 或 env 提供，否则 fail-fast。
 //
 // ⚠️ 该接线是「yaml 优先于 env」。12-factor（env 优先于配置文件）场景请勿直接
 // 复用 LoadBootstrap 的语义——在 yaml 填充后调用 ApplyEnvOverlay(dst)
@@ -61,7 +66,7 @@ func LoadBootstrap[T any](envFlag string) (*T, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", filename, err)
 	}
-	if err := applyTagPasses(&cfg); err != nil {
+	if err := applyTagPasses(&cfg, data); err != nil {
 		return nil, fmt.Errorf("apply struct tags for config file %s: %w", filename, err)
 	}
 	return &cfg, nil

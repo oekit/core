@@ -2,6 +2,29 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.9.0] — 2026-10-18
+
+### feat(config)：零值歧义消解 + required + env 拼错侦测（[#5](https://github.com/oekit/core/issues/5)）
+- **`ExplicitFields` 来源标记**：`ExplicitFromYAML(data, &cfg)` 采集 yaml 文档里显式出现
+  且非 null 的字段路径（键名按 yaml.v3 规则：`yaml:"name"`/字段名小写/`,inline`/`-`，
+  支持锚点别名与 `<<` 合并键）；`ExplicitFromEnv(&cfg)` 采集 env 已设置的字段
+  （nil *struct 内按类型下探）。`FillDefaults`/`ApplyEnv` 新增变参 `...PassOption`，
+  `WithExplicit(set)` 下集合内字段即便零值也不填——**`port: 0` / `REDIS_DB=0` 不再被
+  default 覆盖，无需把整份配置改成指针**
+- **LoadBootstrap 自动接线**（调用方零改动）：ApplyEnv(yaml 显式集) → FillDefaults(yaml∪env 显式集)
+  → CheckRequired → ValidateTags。行为修正：yaml 显式零值此前会被 env/default 覆盖，
+  现按文档化优先级「yaml 显式值 > env > default」真正成立；`port: ~`/`null` 仍视为未提供
+- **`required:"true"` tag + `CheckRequired(v, explicit)`**：「必须由 yaml/env 提供、不吃
+  default」的声明式写法，缺失一次性列出全部字段并附 env 变量名提示；required 与
+  default 互斥（tag 配置错误）；nil *struct 内的 required 同样下探
+- **`CheckEnvOrphans(v, prefixes...)`**：返回环境里带前缀却没有任何 env tag 消费的变量名——
+  `env:"BACKUP_ARCHIVE_ARCHIVE_FORMAT"` 这类拼错编译/vet/test 全过、覆盖静默失效，而部署
+  时真正的 `BACKUP_ARCHIVE_FORMAT` 已在环境里没人消费，启动期即可抓住；prefixes 必填
+- `ValidateTags` 顺带校验 env 名文法（含空白或 `=` 的名字永远匹配不到环境）
+- 文档：FillDefaults 的「需要区分请用指针类型」补边界——少量字段指针可行，整份配置
+  用来源标记或 required；doc.go 同步
+- 单独调用 `FillDefaults(&c)`/`ApplyEnv(&c)` 不带选项时行为不变（零值即未设置）
+
 ## [v0.8.0] — 2026-10-18
 
 - feat(config): `ApplyEnvOverlay[T](dst *T)`——「env 优先于配置文件」的 12-factor 形态（[#2](https://github.com/oekit/core/issues/2)：ApplyEnv 只填零值、yaml 优先，两者语义相反且此前未文档化）；LoadBootstrap 文档补优先级警告
