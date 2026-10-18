@@ -61,7 +61,7 @@ func LoadBootstrap[T any](envFlag string) (*T, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", filename, err)
 	}
-	if err := applyTagPasses(&cfg); err != nil {
+	if err := applyTagPasses(&cfg, data); err != nil {
 		return nil, fmt.Errorf("apply struct tags for config file %s: %w", filename, err)
 	}
 	return &cfg, nil

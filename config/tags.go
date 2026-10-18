@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,15 +16,25 @@ var durationType = reflect.TypeOf(time.Duration(0))
 
 // targetTagNames 是本包支持的独立结构体 tag 集合（与 yaml/merge tag 互不冲突），
 // 供按需分配深层 *struct 时快速判断"该结构体里有没有值得填充的字段"。
-var targetTagNames = [...]string{"default", "env", "range", "options"}
+var targetTagNames = [...]string{"default", "env", "range", "options", "require"}
+
+// envNamePattern 限定 env tag 变量名形如 POSIX 标识符（大写风格不强制，
+// 但禁止空格/点号等会导致 os.LookupEnv 永远 miss 的拼写）。
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // FillDefaults 依据 default tag 为零值字段填充默认值，非零字段一律不动。
 //
 // 优先级约定（与 LoadBootstrap 内 ApplyEnv → FillDefaults 的接线顺序配合）：
 // yaml 显式值 > env tag > default tag。
 //
-// ⚠️ 零值歧义：字段当前的 0/""/false/空切片与"未设置"对反射不可区分，yaml 里
-// 显式写 `port: 0` 同样会被 default 覆盖（设计如此；需要区分请用指针类型）。
+// 零值歧义：字段当前的 0/""/false/空切片与"未设置"对反射不可区分。yaml 里
+// 显式写 `port: 0` 时，**不带 FieldSet** 调用本函数会被 default 覆盖（历史行为）；
+// 需要保留显式零值请传入 WithFieldSet（LoadBootstrap / ApplyTagPasses 已默认接线），
+// 或对该字段打 require tag（default 永不填充，必须由 yaml/env 提供）。
+// 整份配置都要区分零值时，少量字段用指针类型仍可行；改造成本过高则用
+// FieldSet，而不是全量 *T。
+//
+// 带 require tag 的字段本函数永不填充（default 不算「提供」）。
 //
 // 支持类型：string、int*/uint*/float*、bool、time.Duration（time.ParseDuration
 // 文法，如 "5s"）、[]string（逗号切分，元素去首尾空格并丢弃空元素）；标量值
@@ -33,12 +44,16 @@ var targetTagNames = [...]string{"default", "env", "range", "options"}
 // 继续填充）、[]struct / []*struct（仅已存在的元素）；不遍历 map，跳过非导出字段。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
-func FillDefaults(v any) error {
+func FillDefaults(v any, opts ...PassOption) error {
 	rv, err := targetStructValue(v, "FillDefaults")
 	if err != nil {
 		return err
 	}
-	if err := walkTaggedStruct(rv, "", true, fillDefaultField); err != nil {
+	cfg := buildPassConfig(opts)
+	fill := func(sf reflect.StructField, fv reflect.Value, path string) error {
+		return fillDefaultField(sf, fv, path, cfg.set)
+	}
+	if err := walkTaggedStruct(rv, "", true, fill); err != nil {
 		return fmt.Errorf("config: FillDefaults: %w", err)
 	}
 	return nil
@@ -50,22 +65,30 @@ func FillDefaults(v any) error {
 // 优先级约定：yaml 显式值 > env tag > default tag——LoadBootstrap 先 ApplyEnv 后
 // FillDefaults，env 填过的非零字段不会再被 default 覆盖。
 //
+// 带 FieldSet 时，YAML 显式提供的字段（含显式零值）不会被 env 覆盖；env 成功
+// 写入会补记进 FieldSet，避免后续 FillDefaults 用 default 冲掉 env 值。
+//
 // env 设为空串（或纯空白）视同未设置；env 值无法按字段类型解析时 fail-closed
 // 报错（错误信息携带字段路径与变量名）。支持类型与遍历范围同 FillDefaults。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
-func ApplyEnv(v any) error {
+func ApplyEnv(v any, opts ...PassOption) error {
 	rv, err := targetStructValue(v, "ApplyEnv")
 	if err != nil {
 		return err
 	}
-	if err := walkTaggedStruct(rv, "", true, applyEnvField); err != nil {
+	cfg := buildPassConfig(opts)
+	apply := func(sf reflect.StructField, fv reflect.Value, path string) error {
+		return applyEnvField(sf, fv, path, cfg.set)
+	}
+	if err := walkTaggedStruct(rv, "", true, apply); err != nil {
 		return fmt.Errorf("config: ApplyEnv: %w", err)
 	}
 	return nil
 }
 
-// ValidateTags 依据 range / options tag 做 fail-closed 校验，只读不写。
+// ValidateTags 依据 range / options tag 做 fail-closed 校验，只读不写；
+// 同时执行 require 与 env tag 卫生检查。
 //
 //   - range：仅数值字段（含 time.Duration，边界用 duration 文法如 "(0,30s]"）。
 //     文法：`[a,b]`/`(a,b)`/`[a,b)`/`(a,b]` 四种区间 + 单端开区间 `[a,)`/`(,b]`
@@ -73,38 +96,61 @@ func ApplyEnv(v any) error {
 //     错误信息携带字段路径（嵌套用 `.` 连接，切片元素用 `Items[1].Qty`）。
 //   - options：仅 string 字段的枚举校验；当前值（含空串）必须命中枚举之一，
 //     可选枚举字段请配合 default tag 给默认值。
+//   - require：字段必须由 yaml / env 显式提供（default 不算）。带 FieldSet 时
+//     以集合为准（显式零值算通过）；不带 FieldSet 时退化为「最终值非零」。
+//   - env 卫生：变量名须为 `[A-Za-z_][A-Za-z0-9_]*`；同一次校验内重复的 env
+//     名报错；**拼写冒烟检查**——声明的 env 名未设置，而由字段/yaml key 推导的
+//     约定名（`backup_archive_format` → `BACKUP_ARCHIVE_FORMAT`）在环境中已设置
+//     时，报错提示 env tag 疑似拼写错误（否则该环境变量永远无人消费）。
 //
 // 与 FillDefaults/ApplyEnv 配合使用时放在最后（LoadBootstrap 接线顺序
 // ApplyEnv → FillDefaults → ValidateTags），校验的是填充后的最终值。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
-func ValidateTags(v any) error {
+func ValidateTags(v any, opts ...PassOption) error {
 	rv, err := targetStructValue(v, "ValidateTags")
 	if err != nil {
 		return err
 	}
+	cfg := buildPassConfig(opts)
+	envSeen := map[string]string{} // env name -> first field path
+	validate := func(sf reflect.StructField, fv reflect.Value, path string) error {
+		return validateTagFields(sf, fv, path, cfg.set, envSeen)
+	}
 	// 只读校验，不分配：nil 的 *struct 里没有可校验的值。
-	if err := walkTaggedStruct(rv, "", false, validateTagFields); err != nil {
+	if err := walkTaggedStruct(rv, "", false, validate); err != nil {
 		return fmt.Errorf("config: ValidateTags: %w", err)
 	}
 	return nil
 }
 
 // applyTagPasses 是 LoadBootstrap 的接线点：yaml unmarshal 成功后依次执行
-// ApplyEnv → FillDefaults → ValidateTags（优先级 yaml 显式值 > env > default）。
-// 非结构体配置类型（如 map）不适用 struct tag，直接跳过以保持既有行为。
-func applyTagPasses(cfg any) error {
+// ApplyEnv → FillDefaults → ValidateTags（优先级 yaml 显式值 > env > default），
+// 并带 FieldSet 保留 YAML 显式零值。非结构体配置类型（如 map）不适用 struct
+// tag，直接跳过以保持既有行为。
+func applyTagPasses(cfg any, yamlData []byte) error {
 	rv := reflect.ValueOf(cfg)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
 		return nil
 	}
-	if err := ApplyEnv(cfg); err != nil {
+	set, err := FieldSetFromYAML(cfg, yamlData)
+	if err != nil {
 		return err
 	}
-	if err := FillDefaults(cfg); err != nil {
+	if err := ApplyEnv(cfg, WithFieldSet(set)); err != nil {
 		return err
 	}
-	return ValidateTags(cfg)
+	if err := FillDefaults(cfg, WithFieldSet(set)); err != nil {
+		return err
+	}
+	return ValidateTags(cfg, WithFieldSet(set))
+}
+
+// ApplyTagPasses 对任意结构体指针执行完整 tag 接线：先按 yamlData 构建
+// FieldSet，再 ApplyEnv → FillDefaults → ValidateTags。与 LoadBootstrap 内部
+// 同一套语义；热更 / 手写 loader 可直接复用。
+func ApplyTagPasses(cfg any, yamlData []byte) error {
+	return applyTagPasses(cfg, yamlData)
 }
 
 // targetStructValue 校验 v 是非 nil 的结构体指针并返回其 Elem()，
@@ -230,8 +276,15 @@ func typeHasTargetTags(t reflect.Type, seen map[reflect.Type]bool) bool {
 }
 
 // fillDefaultField 是 FillDefaults 的单字段处理：有 default tag 且字段为零值
-// 时，按字段类型解析并写入。
-func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string) error {
+// 时，按字段类型解析并写入。require 字段永不走 default；FieldSet 命中的路径
+// （yaml 显式提供）同样跳过。
+func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string, set FieldSet) error {
+	if set.Has(path) {
+		return nil // yaml 显式提供（含显式零值）
+	}
+	if _, ok := sf.Tag.Lookup("require"); ok {
+		return nil // require：必须由 yaml/env 提供，default 不算
+	}
 	def, ok := sf.Tag.Lookup("default")
 	if !ok || def == "" {
 		return nil
@@ -243,11 +296,15 @@ func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string) err
 }
 
 // applyEnvField 是 ApplyEnv 的单字段处理：env 已设置（非空）且字段为零值时，
-// 按字段类型解析环境变量值并写入。
-func applyEnvField(sf reflect.StructField, fv reflect.Value, path string) error {
+// 按字段类型解析环境变量值并写入。FieldSet 命中的路径（yaml 显式提供）不覆盖；
+// 成功写入后补记进 FieldSet。
+func applyEnvField(sf reflect.StructField, fv reflect.Value, path string, set FieldSet) error {
 	name, ok := sf.Tag.Lookup("env")
 	if !ok || name == "" {
 		return nil
+	}
+	if set.Has(path) {
+		return nil // yaml 显式值优先（含显式零值）
 	}
 	raw, ok := os.LookupEnv(name)
 	if !ok {
@@ -260,12 +317,24 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path string) error 
 	if !isZeroValue(fv) {
 		return nil // yaml 显式值优先
 	}
-	return setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", name, raw), path)
+	if err := setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", name, raw), path); err != nil {
+		return err
+	}
+	if set != nil {
+		set[path] = true
+	}
+	return nil
 }
 
-// validateTagFields 是 ValidateTags 的单字段处理：依次执行 range 与 options
-// 两类校验（二者按字段类型天然互斥，同时滥用会收到其中之一的类型错误）。
-func validateTagFields(sf reflect.StructField, fv reflect.Value, path string) error {
+// validateTagFields 是 ValidateTags 的单字段处理：依次执行 require、range、
+// options 与 env 卫生检查。
+func validateTagFields(sf reflect.StructField, fv reflect.Value, path string, set FieldSet, envSeen map[string]string) error {
+	if err := validateRequireField(sf, fv, path, set); err != nil {
+		return err
+	}
+	if err := validateEnvField(sf, path, envSeen); err != nil {
+		return err
+	}
 	if rng, ok := sf.Tag.Lookup("range"); ok && strings.TrimSpace(rng) != "" {
 		if err := validateRangeField(fv, rng, path); err != nil {
 			return err
@@ -275,6 +344,56 @@ func validateTagFields(sf reflect.StructField, fv reflect.Value, path string) er
 		if err := validateOptionsField(fv, opts, path); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateRequireField 校验 require 字段确实由外部提供。带 FieldSet 时以
+// 「yaml/env 显式」为准（显式零值算通过）；不带 FieldSet 退化为非零检查。
+func validateRequireField(sf reflect.StructField, fv reflect.Value, path string, set FieldSet) error {
+	if _, ok := sf.Tag.Lookup("require"); !ok {
+		return nil
+	}
+	if set != nil {
+		if set.Has(path) {
+			return nil
+		}
+		source := "yaml"
+		if name, ok := sf.Tag.Lookup("env"); ok && name != "" {
+			source = fmt.Sprintf("yaml or env %s", name)
+		}
+		return fmt.Errorf("field %q: required but not provided (set %s)", path, source)
+	}
+	if isZeroValue(fv) {
+		return fmt.Errorf("field %q: required but value is zero (provide via yaml or env before ValidateTags)", path)
+	}
+	return nil
+}
+
+// validateEnvField 校验 env tag 卫生：变量名格式、同名重复、拼写冒烟检查。
+func validateEnvField(sf reflect.StructField, path string, envSeen map[string]string) error {
+	name, ok := sf.Tag.Lookup("env")
+	if !ok || name == "" {
+		return nil
+	}
+	if !envNamePattern.MatchString(name) {
+		return fmt.Errorf("field %q: env tag %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, name)
+	}
+	if prev, dup := envSeen[name]; dup {
+		return fmt.Errorf("field %q: env tag %q already used by field %q", path, name, prev)
+	}
+	envSeen[name] = path
+	if _, ok := os.LookupEnv(name); ok {
+		return nil // 声明的变量已设置，能被消费
+	}
+	// 拼写冒烟检查：声明名未设置，但按字段/yaml key 推导的约定名已设置——
+	// 说明操作方设了变量而本字段永远读不到，几乎必是 env tag 拼写错误。
+	derived := derivedEnvName(sf)
+	if derived == "" || derived == name {
+		return nil
+	}
+	if _, ok := os.LookupEnv(derived); ok {
+		return fmt.Errorf("field %q: env tag %q is unset but derived name %q is set in environment — possible typo in env tag", path, name, derived)
 	}
 	return nil
 }

@@ -2,6 +2,16 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.9.0] — 2026-10-18
+
+### Added
+- `config.FieldSet` / `FieldSetFromYAML` / `WithFieldSet` / `ApplyTagPasses`：显式提供集合——YAML key 出现即算「调用方给了值」，`port: 0` 不再被 default/env 覆盖（[#5](https://github.com/oekit/core/issues/5)）。`LoadBootstrap` 默认接线；单独 `FillDefaults`/`ApplyEnv` 不带集合时保持历史行为
+- `config` struct tag `require`：字段必须由 yaml/env 显式提供，default 不算（FillDefaults 永不填充 require 字段；ValidateTags 缺失时 fail-closed 并指出应设的 env 名）
+- `ValidateTags` env 卫生：变量名格式（`[A-Za-z_][A-Za-z0-9_]*`）、同名校验重复；**拼写冒烟检查**——声明的 env 未设置而推导约定名（`backup_archive_format` → `BACKUP_ARCHIVE_FORMAT`）已设置时报错，拦住「tag 手误 → env 静默失效」
+
+### Docs
+- doc.go 补「零值歧义与 FieldSet」「require」「env 卫生」三节；明确全量 `*T` 指针化不是默认解，优先 FieldSet
+
 ## [v0.8.0] — 2026-10-18
 
 - feat(config): `ApplyEnvOverlay[T](dst *T)`——「env 优先于配置文件」的 12-factor 形态（[#2](https://github.com/oekit/core/issues/2)：ApplyEnv 只填零值、yaml 优先，两者语义相反且此前未文档化）；LoadBootstrap 文档补优先级警告

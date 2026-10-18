@@ -28,21 +28,49 @@
 //	    log.Fatal(err)
 //	}
 //
-// # Struct Tag 增强（default/env/range/options）
+// # Struct Tag 增强（default/env/range/options/require）
 //
 // LoadBootstrap 在 yaml unmarshal 之后依次执行 ApplyEnv → FillDefaults →
-// ValidateTags；三个函数也可单独用于任意结构体指针：
+// ValidateTags（经 ApplyTagPasses，带 FieldSet）；四个函数也可单独用于任意
+// 结构体指针：
 //
 //	type Server struct {
 //	    Host    string        `default:"localhost"`
 //	    Port    int           `default:"8080" env:"APP_PORT" range:"(0,65535]"`
 //	    Timeout time.Duration `default:"5s" range:"(0,30s]"`
 //	    Mode    string        `default:"dev" options:"dev,prod"`
+//	    Secret  string        `require:"true" env:"APP_SECRET"` // 必须外部提供
 //	}
 //
 // 优先级（写死）：yaml 显式值 > env tag（env 已设置且字段为零值时才填）>
-// default tag。注意零值歧义：yaml 显式写 `port: 0` 与未写字段对反射不可区分，
-// 0 会被 default 覆盖（设计如此；需要区分请用指针类型）。
+// default tag。
+//
+// # 零值歧义与 FieldSet
+//
+// 0/""/false/空切片与"未设置"对反射不可区分。yaml 显式写 `port: 0` 时：
+//
+//   - LoadBootstrap / ApplyTagPasses：内部构建 FieldSet，显式零值保留，不被
+//     default / env 覆盖；
+//   - 单独调用 FillDefaults / ApplyEnv（不带 WithFieldSet）：保持历史行为，零值
+//     会被 default 覆盖——需要区分请传 FieldSetFromYAML + WithFieldSet，或对
+//     少量字段用指针类型。
+//
+// 整份配置都要区分零值时，全量 *T 改造成本很高：优先用 FieldSet；少量关键
+// 字段用指针类型仍可行。不要在未评估成本前把配置结构体整体指针化。
+//
+// # require
+//
+// 字段必须由 yaml / env 显式提供，default 不算「提供」（FillDefaults 永不填
+// require 字段）。带 FieldSet 时显式零值也算通过；ValidateTags 在缺失时报错
+// 并指出应设置的 env 变量名。
+//
+// # env 卫生与拼写检查（ValidateTags）
+//
+//   - env 变量名须匹配 `[A-Za-z_][A-Za-z0-9_]*`；
+//   - 同一次校验内重复的 env 名报错；
+//   - 拼写冒烟检查：声明的 env 名未设置，而由字段/yaml key 推导的约定名
+//     （`backup_archive_format` → `BACKUP_ARCHIVE_FORMAT`）已在环境中设置时，
+//     fail-closed 报错——该环境变量永远无人消费，几乎必是 env tag 手误。
 //
 // 支持类型：标量（string/int*/uint*/float*/bool）、time.Duration（time.ParseDuration
 // 文法）、[]string（default/env 逗号切分）。range 仅数值字段，文法
@@ -55,7 +83,7 @@
 // 跳过非导出字段。
 //
 // ConfigWatcher 不自动执行这些 pass（其 parser 由调用方提供）；热更场景可在
-// parser 里自行调用 ApplyEnv/FillDefaults/ValidateTags。
+// parser 里自行调用 ApplyTagPasses / ApplyEnv / FillDefaults / ValidateTags。
 //
 // # 配置文件约定
 //
