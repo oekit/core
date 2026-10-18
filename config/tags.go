@@ -98,10 +98,9 @@ func ApplyEnv(v any, opts ...PassOption) error {
 //     可选枚举字段请配合 default tag 给默认值。
 //   - require：字段必须由 yaml / env 显式提供（default 不算）。带 FieldSet 时
 //     以集合为准（显式零值算通过）；不带 FieldSet 时退化为「最终值非零」。
-//   - env 卫生：变量名须为 `[A-Za-z_][A-Za-z0-9_]*`；同一次校验内重复的 env
-//     名报错；**拼写冒烟检查**——声明的 env 名未设置，而由字段/yaml key 推导的
-//     约定名（`backup_archive_format` → `BACKUP_ARCHIVE_FORMAT`）在环境中已设置
-//     时，报错提示 env tag 疑似拼写错误（否则该环境变量永远无人消费）。
+//   - env 卫生（静态）：变量名须为 `[A-Za-z_][A-Za-z0-9_]*`；同一次校验内重复的
+//     env 名报错。不读进程环境——与环境相关的检查会误报 PATH/HOME 等系统变量、
+//     且漏掉无人设置的真拼写错误（core#8），见 LintEnvNaming / WithEnvNamingLint。
 //
 // 与 FillDefaults/ApplyEnv 配合使用时放在最后（LoadBootstrap 接线顺序
 // ApplyEnv → FillDefaults → ValidateTags），校验的是填充后的最终值。
@@ -115,7 +114,7 @@ func ValidateTags(v any, opts ...PassOption) error {
 	cfg := buildPassConfig(opts)
 	envSeen := map[string]string{} // env name -> first field path
 	validate := func(sf reflect.StructField, fv reflect.Value, path string) error {
-		return validateTagFields(sf, fv, path, cfg.set, envSeen)
+		return validateTagFields(sf, fv, path, cfg.set, envSeen, cfg.envNamingLint)
 	}
 	// 只读校验，不分配：nil 的 *struct 里没有可校验的值。
 	if err := walkTaggedStruct(rv, "", false, validate); err != nil {
@@ -328,12 +327,17 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path string, set Fi
 
 // validateTagFields 是 ValidateTags 的单字段处理：依次执行 require、range、
 // options 与 env 卫生检查。
-func validateTagFields(sf reflect.StructField, fv reflect.Value, path string, set FieldSet, envSeen map[string]string) error {
+func validateTagFields(sf reflect.StructField, fv reflect.Value, path string, set FieldSet, envSeen map[string]string, envNamingLint bool) error {
 	if err := validateRequireField(sf, fv, path, set); err != nil {
 		return err
 	}
 	if err := validateEnvField(sf, path, envSeen); err != nil {
 		return err
+	}
+	if envNamingLint {
+		if err := validateEnvNaming(sf, path); err != nil {
+			return err
+		}
 	}
 	if rng, ok := sf.Tag.Lookup("range"); ok && strings.TrimSpace(rng) != "" {
 		if err := validateRangeField(fv, rng, path); err != nil {
@@ -346,6 +350,53 @@ func validateTagFields(sf reflect.StructField, fv reflect.Value, path string, se
 		}
 	}
 	return nil
+}
+
+// validateEnvNaming 纯静态命名一致性：声明的 env 名应与由 yaml key（缺省字段名）
+// 推导的约定名一致。有意自定义名请打 `ignorederived:"true"`。
+func validateEnvNaming(sf reflect.StructField, path string) error {
+	name, ok := sf.Tag.Lookup("env")
+	if !ok || name == "" {
+		return nil
+	}
+	if _, skip := sf.Tag.Lookup("ignorederived"); skip {
+		return nil
+	}
+	derived := derivedEnvName(sf)
+	if derived == "" || derived == name {
+		return nil
+	}
+	return fmt.Errorf("field %q: env tag %q differs from derived name %q (intentional? add ignorederived:\"true\")", path, name, derived)
+}
+
+// LintEnvNaming 静态扫描 env tag 与推导约定名不一致的字段，返回诊断行
+// （不读进程环境、不 fail-closed）。适合 CI/lint 脚本或启动前自检。
+// 有意自定义名请打 `ignorederived:"true"`。
+func LintEnvNaming(v any) ([]string, error) {
+	rv, err := targetStructValue(v, "LintEnvNaming")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	walk := func(sf reflect.StructField, fv reflect.Value, path string) error {
+		name, ok := sf.Tag.Lookup("env")
+		if !ok || name == "" {
+			return nil
+		}
+		if _, skip := sf.Tag.Lookup("ignorederived"); skip {
+			return nil
+		}
+		derived := derivedEnvName(sf)
+		if derived == "" || derived == name {
+			return nil
+		}
+		out = append(out, fmt.Sprintf("field %q: env tag %q differs from derived name %q", path, name, derived))
+		return nil
+	}
+	if err := walkTaggedStruct(rv, "", false, walk); err != nil {
+		return nil, fmt.Errorf("config: LintEnvNaming: %w", err)
+	}
+	return out, nil
 }
 
 // validateRequireField 校验 require 字段确实由外部提供。带 FieldSet 时以
@@ -370,7 +421,9 @@ func validateRequireField(sf reflect.StructField, fv reflect.Value, path string,
 	return nil
 }
 
-// validateEnvField 校验 env tag 卫生：变量名格式、同名重复、拼写冒烟检查。
+// validateEnvField 校验 env tag 静态卫生：变量名格式、同名重复。
+// 不读进程环境——依赖运行环境的“拼写冒烟检查”会误报 PATH/HOME 等系统变量、
+// 且漏掉无人设置的真拼写错误（见 core#8），已改为可选的 LintEnvNaming。
 func validateEnvField(sf reflect.StructField, path string, envSeen map[string]string) error {
 	name, ok := sf.Tag.Lookup("env")
 	if !ok || name == "" {
@@ -383,18 +436,6 @@ func validateEnvField(sf reflect.StructField, path string, envSeen map[string]st
 		return fmt.Errorf("field %q: env tag %q already used by field %q", path, name, prev)
 	}
 	envSeen[name] = path
-	if _, ok := os.LookupEnv(name); ok {
-		return nil // 声明的变量已设置，能被消费
-	}
-	// 拼写冒烟检查：声明名未设置，但按字段/yaml key 推导的约定名已设置——
-	// 说明操作方设了变量而本字段永远读不到，几乎必是 env tag 拼写错误。
-	derived := derivedEnvName(sf)
-	if derived == "" || derived == name {
-		return nil
-	}
-	if _, ok := os.LookupEnv(derived); ok {
-		return fmt.Errorf("field %q: env tag %q is unset but derived name %q is set in environment — possible typo in env tag", path, name, derived)
-	}
 	return nil
 }
 

@@ -244,39 +244,66 @@ func TestEnv_DuplicateName(t *testing.T) {
 	}
 }
 
-func TestEnv_TypoSmokingGun(t *testing.T) {
-	// 操作方设了 BACKUP_ARCHIVE_FORMAT，字段却写成 …_ARCHIVE_FORMAT 多一段
-	t.Setenv("BACKUP_ARCHIVE_FORMAT", "tar")
+func TestEnv_TypoNoFalsePositive_SystemPath(t *testing.T) {
+	// core#8：字段 Path / tag LOG_PATH 不得因宿主机 PATH 而误报
+	t.Setenv("PATH", "/usr/bin") // 通常已存在，再设一次确保
 	cfg := struct {
-		Format string `yaml:"backup_archive_format" env:"BACKUP_ARCHIVE_ARCHIVE_FORMAT"`
+		Path string `yaml:"path" env:"LOG_PATH" default:""`
+	}{}
+	if err := ValidateTags(&cfg); err != nil {
+		t.Errorf("valid LOG_PATH must not fail ValidateTags, got %v", err)
+	}
+	if err := ValidateTags(&cfg, WithEnvNamingLint()); err == nil {
+		t.Error("naming lint should flag LOG_PATH != derived PATH")
+	}
+}
+
+func TestEnv_RealTypoCaughtByNamingLint(t *testing.T) {
+	// 真拼写错误 LOG_LEVELS（多 S）：静态命名检查可检出，且不依赖环境
+	cfg := struct {
+		Level string `yaml:"log_level" env:"LOG_LEVELS" default:"info"`
+	}{}
+	if err := ValidateTags(&cfg); err != nil {
+		t.Errorf("default ValidateTags must stay quiet on naming, got %v", err)
+	}
+	err := ValidateTags(&cfg, WithEnvNamingLint())
+	if err == nil || !strings.Contains(err.Error(), "LOG_LEVEL") {
+		t.Fatalf("naming lint should catch LOG_LEVELS vs LOG_LEVEL, got %v", err)
+	}
+}
+
+func TestEnv_IgnoreDerivedOptOut(t *testing.T) {
+	cfg := struct {
+		Path string `yaml:"path" env:"LOG_PATH" default:"" ignorederived:"true"`
+	}{}
+	if err := ValidateTags(&cfg, WithEnvNamingLint()); err != nil {
+		t.Errorf("ignorederived should opt out, got %v", err)
+	}
+}
+
+func TestLintEnvNaming_ListsMismatches(t *testing.T) {
+	cfg := struct {
+		Path  string `yaml:"path" env:"LOG_PATH"`
+		Level string `yaml:"log_level" env:"LOG_LEVEL"`
+		Home  string `yaml:"home" env:"MY_HOME" ignorederived:"true"`
+	}{}
+	issues, err := LintEnvNaming(&cfg)
+	if err != nil {
+		t.Fatalf("LintEnvNaming: %v", err)
+	}
+	if len(issues) != 1 || !strings.Contains(issues[0], "LOG_PATH") {
+		t.Errorf("expected only LOG_PATH mismatch, got %v", issues)
+	}
+}
+
+func TestEnv_DuplicateStillFails(t *testing.T) {
+	cfg := struct {
+		A string `env:"FS_DUP_VAR2"`
+		B string `env:"FS_DUP_VAR2"`
 	}{}
 	err := ValidateTags(&cfg)
-	if err == nil || !strings.Contains(err.Error(), "possible typo") {
-		t.Fatalf("expected typo error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "BACKUP_ARCHIVE_FORMAT") {
-		t.Errorf("error should name derived var, got %v", err)
-	}
-}
-
-func TestEnv_TypoNoFalsePositive_WhenDerivedUnset(t *testing.T) {
-	// 声明名未设置，约定名也未设置 → 可选配置，不报
-	cfg := struct {
-		Format string `yaml:"backup_archive_format" env:"BACKUP_ARCHIVE_ARCHIVE_FORMAT"`
-	}{}
-	if err := ValidateTags(&cfg); err != nil {
-		t.Errorf("optional unset env should not error, got %v", err)
-	}
-}
-
-func TestEnv_TypoNoFalsePositive_WhenDeclaredSet(t *testing.T) {
-	t.Setenv("CUSTOM_PORT_NAME", "1")
-	t.Setenv("PORT", "2") // 约定名也被设置，但声明名在用 → 正常
-	cfg := struct {
-		Port int `yaml:"port" env:"CUSTOM_PORT_NAME"`
-	}{}
-	if err := ValidateTags(&cfg); err != nil {
-		t.Errorf("declared env set should pass, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Errorf("duplicate env name must still fail, got %v", err)
 	}
 }
 
