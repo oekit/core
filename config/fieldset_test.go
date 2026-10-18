@@ -11,12 +11,12 @@ type fsInner struct {
 }
 
 type fsConfig struct {
-	Host   string   `yaml:"host" default:"localhost"`
-	Port   int      `yaml:"port" default:"8080"`
-	Name   string   `yaml:"name" default:"app"`
-	Inner  fsInner  `yaml:"inner"`
+	Host   string    `yaml:"host" default:"localhost"`
+	Port   int       `yaml:"port" default:"8080"`
+	Name   string    `yaml:"name" default:"app"`
+	Inner  fsInner   `yaml:"inner"`
 	Items  []fsInner `yaml:"items"`
-	Secret string   `yaml:"secret" require:"true" env:"FS_TEST_SECRET"`
+	Secret string    `yaml:"secret" require:"true" env:"FS_TEST_SECRET"`
 }
 
 // ---- FieldSetFromYAML ----
@@ -282,13 +282,13 @@ func TestEnv_TypoNoFalsePositive_WhenDeclaredSet(t *testing.T) {
 
 func TestToScreamingSnake(t *testing.T) {
 	cases := map[string]string{
-		"max_open":             "MAX_OPEN",
-		"MaxOpen":              "MAX_OPEN",
-		"BackupArchiveFormat":  "BACKUP_ARCHIVE_FORMAT",
-		"backupArchiveFormat":  "BACKUP_ARCHIVE_FORMAT",
-		"DSN":                  "DSN",
-		"already_snake":        "ALREADY_SNAKE",
-		"":                     "",
+		"max_open":            "MAX_OPEN",
+		"MaxOpen":             "MAX_OPEN",
+		"BackupArchiveFormat": "BACKUP_ARCHIVE_FORMAT",
+		"backupArchiveFormat": "BACKUP_ARCHIVE_FORMAT",
+		"DSN":                 "DSN",
+		"already_snake":       "ALREADY_SNAKE",
+		"":                    "",
 	}
 	for in, want := range cases {
 		if got := toScreamingSnake(in); got != want {
