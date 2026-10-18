@@ -64,13 +64,18 @@
 // require 字段）。带 FieldSet 时显式零值也算通过；ValidateTags 在缺失时报错
 // 并指出应设置的 env 变量名。
 //
-// # env 卫生与拼写检查（ValidateTags）
+// # env 卫生与命名检查
+//
+// ValidateTags 只做**静态**检查（与进程环境无关）：
 //
 //   - env 变量名须匹配 `[A-Za-z_][A-Za-z0-9_]*`；
-//   - 同一次校验内重复的 env 名报错；
-//   - 拼写冒烟检查：声明的 env 名未设置，而由字段/yaml key 推导的约定名
-//     （`backup_archive_format` → `BACKUP_ARCHIVE_FORMAT`）已在环境中设置时，
-//     fail-closed 报错——该环境变量永远无人消费，几乎必是 env tag 手误。
+//   - 同一次校验内重复的 env 名报错。
+//
+// 命名一致性是**可选**的：`LintEnvNaming` 返回「声明名 ≠ 推导约定名」
+// （`backup_archive_format` → `BACKUP_ARCHIVE_FORMAT`）的诊断列表；需要
+// fail-closed 时传 `WithEnvNamingLint()`。有意自定义名（如 `LOG_PATH`）请打
+// `ignorederived:"true"` 豁免。不要依赖「环境里恰好有某变量」做拼写判定——
+// 会误报 PATH/HOME 等系统变量，且漏掉无人设置的真拼写错误（core#8）。
 //
 // 支持类型：标量（string/int*/uint*/float*/bool）、time.Duration（time.ParseDuration
 // 文法）、[]string（default/env 逗号切分）。range 仅数值字段，文法

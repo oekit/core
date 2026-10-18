@@ -2,6 +2,15 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.9.2] — 2026-10-19
+
+### Fixed
+- **breaking(检查行为)**：移除 `ValidateTags` 中依赖进程环境的 env「拼写冒烟检查」——会误报 `PATH`/`HOME` 等系统变量（合法配置在 CI/宿主机启动失败，如字段 `Path` + `env:"LOG_PATH"` 撞上系统 `PATH`），且漏掉无人设置的真拼写错误（[#8](https://github.com/oekit/core/issues/8)）
+
+### Added
+- `LintEnvNaming(v)`：纯静态命名一致性诊断（声明 env 名 ≠ 由 yaml key/字段名推导的约定名），返回诊断列表、不读环境、不 fail-closed；`WithEnvNamingLint()` 使 ValidateTags 对同一判定 fail-closed；字段 `ignorederived:"true"` 豁免有意自定义名
+- `ValidateTags` 保留的 env 检查仅限静态项：变量名格式、同名校验重复
+
 ## [v0.9.1] — 2026-10-18
 
 ### Fixed

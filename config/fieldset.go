@@ -30,7 +30,8 @@ func (s FieldSet) Has(path string) bool {
 type PassOption func(*passConfig)
 
 type passConfig struct {
-	set FieldSet
+	set           FieldSet
+	envNamingLint bool
 }
 
 // WithFieldSet 传入显式提供集合：命中的路径视为「已有调用方值」——
@@ -38,6 +39,13 @@ type passConfig struct {
 // ApplyEnv 成功写入时会向该集合补记路径（map 引用语义，调用方可见）。
 func WithFieldSet(s FieldSet) PassOption {
 	return func(c *passConfig) { c.set = s }
+}
+
+// WithEnvNamingLint 让 ValidateTags 对「声明的 env 名 ≠ 由字段/yaml key 推导的
+// 约定名」报错（纯静态，不读进程环境）。有意使用自定义名时在字段上打
+// `ignorederived:"true"` 豁免。默认关闭——命名不一致并不一定是错误。
+func WithEnvNamingLint() PassOption {
+	return func(c *passConfig) { c.envNamingLint = true }
 }
 
 func buildPassConfig(opts []PassOption) *passConfig {
