@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-
-	"gopkg.in/yaml.v3"
 )
 
 // envPattern matches ${VAR} or ${VAR:default} placeholders.
@@ -44,7 +42,10 @@ func expandEnv(data []byte) []byte {
 // Lookup order:
 //  1. etc/config.yaml — used in Docker images (renamed from config-{env}.yaml at build time)
 //  2. etc/config-{envFlag}.yaml — used in local development (envFlag = "dev", "local", "prod")
-func LoadBootstrap[T any](envFlag string) (*T, error) {
+//
+// 可选传 WithStrict() 开启严格模式：未知键直接拒载，错误信息带嵌套路径与
+// 该层合法键清单（见 strict.go）。默认仍是历史行为（未知键静默忽略）。
+func LoadBootstrap[T any](envFlag string, opts ...LoadOption) (*T, error) {
 	filename := "etc/config.yaml"
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -58,7 +59,7 @@ func LoadBootstrap[T any](envFlag string) (*T, error) {
 	data = expandEnv(data)
 
 	var cfg T
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := unmarshalConfig(data, &cfg, newLoadOptions(opts)); err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", filename, err)
 	}
 	if err := applyTagPasses(&cfg, data); err != nil {

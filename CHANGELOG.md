@@ -2,6 +2,24 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.10.0] — 2026-10-20
+
+### feat(config)：严格模式——未知键拒载 + 合法键清单 + 嵌套路径（[#20](https://github.com/oekit/core/issues/20)）
+- `LoadBootstrap[T](envFlag string, opts ...LoadOption)` 新增可选参数（向后兼容）：
+  传 `config.WithStrict()` 开启严格模式，**未知键直接拒载**，不再静默忽略。
+- 错误信息（`*config.UnknownKeyError`）给出三件事：
+  1. **嵌套路径**（YAML 键形式，如 `llm.base_ur`）；
+  2. **该层合法键清单**（超 12 个时只列前若干并注明总数——200+ 字段全列是噪音）；
+  3. **近似拼写建议**（编辑距离，如「是否想写 "base_url"？」）。
+- 为何不用 yaml.v3 自带的 `Decoder.KnownFields(true)`：它只说
+  「field X not found in type Y」——不告诉用户这一层有哪些合法键，也不给嵌套路径；
+  对 200+ 字段的结构体，用户既不知道自己在哪一层，也不知道正确拼法。
+- 合法键判定**与 yaml.v3 字段语义逐条对齐**（yaml tag 优先 / 无 tag 取小写字段名 /
+  显式 `,inline` 拍平 / 内嵌未导出类型同样处理 / `yaml:"-"` 跳过）——不一致会把
+  合法键误报成未知键。已用测试钉死（`TestStrictMatchesYAMLv3FieldSemantics`）。
+- 默认行为不变（未知键仍静默忽略），严格模式是显式开启——它会让「之前一直能跑
+  （因为键拼错被忽略）」的配置开始报错，切换前需确认现有配置无误。
+
 ## [v0.9.2] — 2026-10-19
 
 ### Fixed
