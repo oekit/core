@@ -2,6 +2,31 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.11.0] — 2026-10-21
+
+### feat(config): 加载入口按来源拆开——`LoadFile`（任意路径）/ `Unmarshal`（字节源）（[#25](https://github.com/oekit/core/issues/25)）
+- v0.10.0 的严格模式只有**一个**入口 `LoadBootstrap[T]`，而它的**查找路径写死**
+  在 `etc/config.yaml` 约定上——严格模式、`${VAR}` 展开、tag 接线全封在这条固定
+  路径的加载线里。**不遵循 etc/ 约定的宿主吃不上**：CLI `-config` 任意路径、
+  容器内镜像内固定挂载位（如 `/app/plugins.yaml`）、配置来自 API 下发 / 模板渲染
+  产物 / 测试夹具。
+  实锤：argus（v3.159.0）评估后接不上，退回 `yaml.v3` 的 `KnownFields(true)`——
+  拒载语义有了，但**嵌套路径、合法键清单、拼写建议这三样最有价值的诊断全丢了**，
+  等于 #20 的核心收益对这类宿主不可达。
+- 新增两个入口：
+  - `LoadFile(path string, dst any, opts ...LoadOption) error`——**任意路径**；
+  - `Unmarshal(data []byte, dst any, opts ...LoadOption) error`——**字节源**。
+- **三个入口共享同一条解码线**（`unmarshalInto`：展开 `${VAR}` → 可选严格判定 →
+  解码 → tag 接线 ApplyEnv → FillDefaults → ValidateTags）。因此严格模式的诊断面
+  **与来源无关**——不会因为「不是从 etc/ 约定路径读的」就退化成一条
+  “field X not found in type Y”。
+- `LoadBootstrap` 行为**逐字不变**：历史错误文案（`parse config file X: ...` /
+  `apply struct tags for config file X: ...`）保持原样（内部用 `parseErr`/`tagErr`
+  区分两类失败以保住文案），既有调用方零改动。
+- 测试：两入口的 `*UnknownKeyError` 诊断（路径/合法键清单/拼写建议）逐项一致；
+  任意路径加载；字节级入口同样走 tag 接线（env 优先于 default）；字节级入口同样
+  展开 `${VAR}`；非严格模式仍忽略未知键；`LoadBootstrap` 错误文案不变。
+
 ## [v0.10.0] — 2026-10-20
 
 ### feat(config)：严格模式——未知键拒载 + 合法键清单 + 嵌套路径（[#20](https://github.com/oekit/core/issues/20)）

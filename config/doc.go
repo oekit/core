@@ -28,6 +28,19 @@
 //	    log.Fatal(err)
 //	}
 //
+// # 加载入口（按来源选）
+//
+//   - `LoadBootstrap[T](envFlag)`：**etc/ 约定**下的路径查找（etc/config.yaml →
+//     etc/config-{env}.yaml），返回 *T；
+//   - `LoadFile(path, dst)`：**任意路径**（CLI -config 传的路径、容器内固定挂载位
+//     如 /app/plugins.yaml、部署方自定路径）；
+//   - `Unmarshal(data, dst)`：**字节源**（API 下发、模板渲染产物、测试夹具）。
+//
+// 三个入口共享**同一条解码线**（展开 ${VAR} → 可选严格判定 → 解码 → tag 接线），
+// 因此严格模式（WithStrict()）的诊断面（嵌套路径 + 该层合法键清单 + 近似拼写建议）
+// **与来源无关**——不会因为「不是从 etc/ 约定路径读的」就退化成一条
+// “field X not found in type Y”。
+//
 // # Struct Tag 增强（default/env/range/options/require）
 //
 // LoadBootstrap 在 yaml unmarshal 之后依次执行 ApplyEnv → FillDefaults →
