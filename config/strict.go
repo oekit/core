@@ -129,7 +129,7 @@ func yamlFields(t reflect.Type, prefix []int) map[string]fieldInfo {
 		}
 		idx := append(append([]int{}, prefix...), i)
 		ft := sf.Type
-		for ft.Kind() == reflect.Ptr {
+		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
 		// 只有**显式** `,inline` 才拍平。yaml.v3 对「内嵌但无 yaml tag」的字段
@@ -163,10 +163,13 @@ func checkUnknownKeys(data []byte, out any) error {
 	}
 	var node yaml.Node
 	if err := yaml.Unmarshal(data, &node); err != nil {
-		return nil // 语法错误交给 yaml.Unmarshal 统一报，这里不重复
+		// YAML **语法**错误：直接返回（与后续解码同一份错误，由调用方统一包装成
+		// 「parse config file X: ...」）。不吞掉——吞错误会让「配置写错了」变成
+		// 「什么都没发生」。
+		return err
 	}
 	rv := reflect.ValueOf(out)
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil
 		}
@@ -196,7 +199,7 @@ func walkStrict(node *yaml.Node, t reflect.Type, path string) error {
 	case yaml.SequenceNode:
 		// 切片元素：路径不带键（元素无稳定名），逐个按元素类型检查
 		et := t
-		for et.Kind() == reflect.Ptr {
+		for et.Kind() == reflect.Pointer {
 			et = et.Elem()
 		}
 		if et.Kind() != reflect.Slice && et.Kind() != reflect.Array {
@@ -215,7 +218,7 @@ func walkStrict(node *yaml.Node, t reflect.Type, path string) error {
 }
 
 func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {
@@ -271,7 +274,7 @@ func joinPath(path, key string) string {
 func fieldTypeAt(t reflect.Type, index []int) reflect.Type {
 	for _, i := range index {
 		t = t.Field(i).Type
-		for t.Kind() == reflect.Ptr {
+		for t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
 	}

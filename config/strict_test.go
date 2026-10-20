@@ -129,7 +129,7 @@ func TestStrictMapKeysAllowedButValuesChecked(t *testing.T) {
 		t.Fatalf("map 的任意键应合法：%v", err)
 	}
 	var bad withMap
-	err := unmarshalConfig([]byte("items:\n  anything:\n    nmae: x\n"), &bad,
+	err := unmarshalConfig([]byte("items:\n  anything:\n    nmae: x\n"), &bad, //nolint:misspell // 故意拼错的键名
 		newLoadOptions([]LoadOption{WithStrict()}))
 	if err == nil {
 		t.Fatalf("map 值内部的未知键应被拒载")
