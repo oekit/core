@@ -90,6 +90,26 @@
 // ConfigWatcher 不自动执行这些 pass（其 parser 由调用方提供）；热更场景可在
 // parser 里自行调用 ApplyTagPasses / ApplyEnv / FillDefaults / ValidateTags。
 //
+// # 严格模式（未知键拒载）
+//
+// 默认未知键被 yaml.v3 **静默丢弃**——对 200+ 字段的配置结构体，
+// 「拼错一个键」会表现为「我配了但没生效」（静默走零值缺省），
+// 排查要等到看日志、查文档、怀疑平台才定位到是自己拼错了。
+//
+// 传 WithStrict() 开启严格模式：未知键**直接拒载**，错误信息给出
+// **嵌套路径**、**该层合法键清单**与**近似拼写建议**：
+//
+//	cfg, err := config.LoadBootstrap[AppConfig]("dev", config.WithStrict())
+//	// config: 未知配置键 "llm.base_ur"（是否想写 "base_url"？）；该层合法键：
+//	// api_key, base_url, timeout_ms
+//
+// 严格模式是**显式开启**的——它会让「之前一直能跑（因为键拼错被忽略）」的配置
+// 开始报错，切换前需确认现有配置无误。
+//
+// 合法键判定与 yaml.v3 的字段语义**逐条对齐**（yaml tag 优先、无 tag 取小写
+// 字段名、显式 `,inline` 拍平、内嵌未导出类型同样处理）——不一致会把合法键
+// 误报成未知键。
+//
 // # 配置文件约定
 //
 // 配置文件路径：etc/config-{env}.yaml
