@@ -21,7 +21,7 @@ go get github.com/oekit/core@v0.11.0
 | 包 | 做什么 |
 |---|---|
 | `governance` | 治理配置模板 schema（retry/timeout_ms/circuit_breaker/limiter）+ `Parse`/`Store`。JSON 形态对 Nacos 友好，hertz/kitex 两侧共用 |
-| `config` | 配置文件加载：`LoadBootstrap[T]`（**etc/ 约定**路径）、`LoadFile`（**任意路径**）、`Unmarshal`（**字节源**）——三者同一条解码线，严格模式诊断面与来源无关（YAML + `${VAR}` 占位符展开 + struct tag `default`/`env`/`range`/`options`/`require` + FieldSet 保留显式零值）、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
+| `config` | 配置文件加载：`LoadBootstrap[T]`（**etc/ 约定**路径）、`LoadFile`（**任意路径**）、`Unmarshal`（**字节源**）——三者同一条解码线，严格模式诊断面与来源无关（YAML + `${VAR}` 占位符展开 + struct tag `default`/`env`/`range`/`options`/`require` + FieldSet 保留显式零值）、**env 命名策略**（全局前缀 + 逐字段覆盖，接 12-factor 宿主的 `PB_` 约定）、`LoadDotEnv`、env 系列、`ConfigWatcher[T]` 热更新、`OverlayMerge`。只依赖 yaml+logx，零 Nacos |
 | `lifecycle` | 应用生命周期：`App` 契约（hertz/kitex 的 `RunServer` 面向它编程）+ `Manager` 优雅关停（closer/teardown/drain/信号） |
 | `network` | IP 工具：`GetPodIP`（K8s POD_IP 感知）、`IsPublicIP`——注册地址解析的公共依赖 |
 | `version` | 版本信息（ldflags 注入 `Metadata()`） |
@@ -47,6 +47,14 @@ config.LoadDotEnv(".env")                         // 可选：本地 .env
 // 不遵循 etc/ 约定的宿主：任意路径 / 字节源（诊断面与上面完全同源）
 err = config.LoadFile("/app/plugins.yaml", &cfg, config.WithStrict())
 err = config.Unmarshal([]byte(rawYAML), &cfg, config.WithStrict())
+
+// env 命名策略：统一前缀（PB_）+ 逐字段覆盖（历史 env 名与 yaml 键对不上时用）
+err = config.LoadBootstrap[MyConfig]("dev",
+    config.WithEnvPrefix("PB_"),
+    config.WithEnvOverrides(map[string]string{
+        "upload.local_import.enabled": "PB_LOCAL_IMPORT_ENABLED",
+    }),
+)
 ```
 
 ## 边界

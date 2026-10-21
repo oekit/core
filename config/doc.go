@@ -90,6 +90,27 @@
 // `ignorederived:"true"` 豁免。不要依赖「环境里恰好有某变量」做拼写判定——
 // 会误报 PATH/HOME 等系统变量，且漏掉无人设置的真拼写错误（core#8）。
 //
+// # env 命名策略（前缀 / 逐字段覆盖）
+//
+// 字段的 env 变量名默认由结构体作者逐字段写死（`env:"NAME"` tag）。宿主若要
+// **统一前缀**（`PB_` / `APP_` / `SVC_`）或**逐字段改名**（历史 env 名与 yaml
+// 键对不上、需保留兼容），用 EnvNaming——见 envnaming.go：
+//
+//	cfg, err := config.LoadBootstrap[MyConfig]("dev",
+//	    config.WithEnvPrefix("PB_"),                    // 全局前缀
+//	    config.WithEnvOverrides(map[string]string{
+//	        "upload.local_import.enabled": "PB_LOCAL_IMPORT_ENABLED", // 逐字段覆盖
+//	    }),
+//	)
+//
+// 名字解析顺序：覆盖表 → env tag → 路径派生名（yaml 键路径的 SCREAMING_SNAKE）。
+// 覆盖表命中即用表里的**绝对名**（值为空串 = 该字段不走 env）；前缀只加在
+// 本包推导的名字上。**未启用策略时行为与历史逐字一致**：只有打了 env tag 的
+// 字段读 env。
+//
+// 覆盖表的键是 **yaml 键路径**（与严格模式诊断路径同口径）：嵌套用 `.` 连接、
+// 切片元素不编号、`yaml:",inline"` 的子字段拍平到父级。
+//
 // 支持类型：标量（string/int*/uint*/float*/bool）、time.Duration（time.ParseDuration
 // 文法）、[]string（default/env 逗号切分）。range 仅数值字段，文法
 // `[a,b]`/`(a,b)`/`[a,b)`/`(a,b]`/单端 `[a,)`/`(,b]`（Duration 字段边界用

@@ -32,6 +32,7 @@ type PassOption func(*passConfig)
 type passConfig struct {
 	set           FieldSet
 	envNamingLint bool
+	envNaming     EnvNaming
 }
 
 // WithFieldSet 传入显式提供集合：命中的路径视为「已有调用方值」——

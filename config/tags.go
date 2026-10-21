@@ -50,10 +50,10 @@ func FillDefaults(v any, opts ...PassOption) error {
 		return err
 	}
 	cfg := buildPassConfig(opts)
-	fill := func(sf reflect.StructField, fv reflect.Value, path string) error {
+	fill := func(sf reflect.StructField, fv reflect.Value, path, _ string, _ bool) error {
 		return fillDefaultField(sf, fv, path, cfg.set)
 	}
-	if err := walkTaggedStruct(rv, "", true, fill); err != nil {
+	if err := walkTaggedStruct(rv, "", "", true, true, fill); err != nil {
 		return fmt.Errorf("config: FillDefaults: %w", err)
 	}
 	return nil
@@ -78,10 +78,10 @@ func ApplyEnv(v any, opts ...PassOption) error {
 		return err
 	}
 	cfg := buildPassConfig(opts)
-	apply := func(sf reflect.StructField, fv reflect.Value, path string) error {
-		return applyEnvField(sf, fv, path, cfg.set)
+	apply := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
+		return applyEnvField(sf, fv, path, yamlPath, addr, cfg.set, cfg.envNaming)
 	}
-	if err := walkTaggedStruct(rv, "", true, apply); err != nil {
+	if err := walkTaggedStruct(rv, "", "", true, true, apply); err != nil {
 		return fmt.Errorf("config: ApplyEnv: %w", err)
 	}
 	return nil
@@ -112,12 +112,15 @@ func ValidateTags(v any, opts ...PassOption) error {
 		return err
 	}
 	cfg := buildPassConfig(opts)
-	envSeen := map[string]string{} // env name -> first field path
-	validate := func(sf reflect.StructField, fv reflect.Value, path string) error {
-		return validateTagFields(sf, fv, path, cfg.set, envSeen, cfg.envNamingLint)
+	if err := checkEnvNaming(cfg.envNaming); err != nil {
+		return fmt.Errorf("config: ValidateTags: %w", err)
+	}
+	envSeen := map[string]envSeenEntry{} // env name -> first field
+	validate := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
+		return validateTagFields(sf, fv, path, yamlPath, addr, cfg.set, envSeen, cfg.envNamingLint, cfg.envNaming)
 	}
 	// 只读校验，不分配：nil 的 *struct 里没有可校验的值。
-	if err := walkTaggedStruct(rv, "", false, validate); err != nil {
+	if err := walkTaggedStruct(rv, "", "", true, false, validate); err != nil {
 		return fmt.Errorf("config: ValidateTags: %w", err)
 	}
 	return nil
@@ -127,7 +130,9 @@ func ValidateTags(v any, opts ...PassOption) error {
 // ApplyEnv → FillDefaults → ValidateTags（优先级 yaml 显式值 > env > default），
 // 并带 FieldSet 保留 YAML 显式零值。非结构体配置类型（如 map）不适用 struct
 // tag，直接跳过以保持既有行为。
-func applyTagPasses(cfg any, yamlData []byte) error {
+//
+// naming 是 env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
+func applyTagPasses(cfg any, yamlData []byte, naming EnvNaming) error {
 	rv := reflect.ValueOf(cfg)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
 		return nil
@@ -136,20 +141,22 @@ func applyTagPasses(cfg any, yamlData []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := ApplyEnv(cfg, WithFieldSet(set)); err != nil {
+	if err := ApplyEnv(cfg, WithFieldSet(set), WithEnvNaming(naming)); err != nil {
 		return err
 	}
 	if err := FillDefaults(cfg, WithFieldSet(set)); err != nil {
 		return err
 	}
-	return ValidateTags(cfg, WithFieldSet(set))
+	return ValidateTags(cfg, WithFieldSet(set), WithEnvNaming(naming))
 }
 
 // ApplyTagPasses 对任意结构体指针执行完整 tag 接线：先按 yamlData 构建
 // FieldSet，再 ApplyEnv → FillDefaults → ValidateTags。与 LoadBootstrap 内部
 // 同一套语义；热更 / 手写 loader 可直接复用。
-func ApplyTagPasses(cfg any, yamlData []byte) error {
-	return applyTagPasses(cfg, yamlData)
+//
+// 可传 WithEnvNaming 启用 env 命名策略（前缀 / 逐字段覆盖）。
+func ApplyTagPasses(cfg any, yamlData []byte, opts ...PassOption) error {
+	return applyTagPasses(cfg, yamlData, buildPassConfig(opts).envNaming)
 }
 
 // targetStructValue 校验 v 是非 nil 的结构体指针并返回其 Elem()，
@@ -172,8 +179,14 @@ func targetStructValue(v any, fn string) (reflect.Value, error) {
 // 分配后再递归（让 default/env 填充能到达深层）；alloc 为 false（只读 pass）
 // 跳过 nil 指针。路径格式：`Server.Port`、`Items[0].Qty`。
 //
+// visit 同时收到该字段的 **yaml 键路径**（yamlPath）与**可寻址标记**（addr），
+// 口径与严格模式诊断（UnknownKeyError.Path）一致：嵌套用 `.` 连接、切片元素
+// 不编号（`items.qty` 而非 `items[0].qty`）、`yaml:",inline"` 的子字段拍平到
+// 父级、`yaml:"-"` 的字段及其子树不可寻址（addr=false）。
+// env 命名策略（覆盖表 / 前缀）按 yaml 键路径寻址，故需要这条并行口径。
+//
 // v 必须是可寻址的 struct 值（来自指针 Elem 或切片元素）。
-func walkTaggedStruct(v reflect.Value, path string, alloc bool, visit func(reflect.StructField, reflect.Value, string) error) error {
+func walkTaggedStruct(v reflect.Value, path, yamlPath string, yamlAddr bool, alloc bool, visit func(reflect.StructField, reflect.Value, string, string, bool) error) error {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
@@ -185,12 +198,14 @@ func walkTaggedStruct(v reflect.Value, path string, alloc bool, visit func(refle
 		if path != "" {
 			fpath = path + "." + sf.Name
 		}
-		if err := visit(sf, fv, fpath); err != nil {
+		// yaml 键路径与可寻址性：inline 拍平到父级、yaml:"-" 不可寻址。
+		fyaml, faddr, childYaml, childAddr := yamlChildPath(sf, yamlPath, yamlAddr)
+		if err := visit(sf, fv, fpath, fyaml, faddr); err != nil {
 			return err
 		}
 		switch sf.Type.Kind() {
 		case reflect.Struct:
-			if err := walkTaggedStruct(fv, fpath, alloc, visit); err != nil {
+			if err := walkTaggedStruct(fv, fpath, childYaml, childAddr, alloc, visit); err != nil {
 				return err
 			}
 		case reflect.Pointer:
@@ -203,7 +218,7 @@ func walkTaggedStruct(v reflect.Value, path string, alloc bool, visit func(refle
 				}
 				fv.Set(reflect.New(sf.Type.Elem()))
 			}
-			if err := walkTaggedStruct(fv.Elem(), fpath, alloc, visit); err != nil {
+			if err := walkTaggedStruct(fv.Elem(), fpath, childYaml, childAddr, alloc, visit); err != nil {
 				return err
 			}
 		case reflect.Slice:
@@ -211,7 +226,8 @@ func walkTaggedStruct(v reflect.Value, path string, alloc bool, visit func(refle
 			switch {
 			case elem.Kind() == reflect.Struct:
 				for j := 0; j < fv.Len(); j++ {
-					if err := walkTaggedStruct(fv.Index(j), fmt.Sprintf("%s[%d]", fpath, j), alloc, visit); err != nil {
+					// yaml 路径不编号元素（与严格模式同口径），Go 路径照旧带下标。
+					if err := walkTaggedStruct(fv.Index(j), fmt.Sprintf("%s[%d]", fpath, j), childYaml, childAddr, alloc, visit); err != nil {
 						return err
 					}
 				}
@@ -221,7 +237,7 @@ func walkTaggedStruct(v reflect.Value, path string, alloc bool, visit func(refle
 					if ev.IsNil() {
 						continue
 					}
-					if err := walkTaggedStruct(ev.Elem(), fmt.Sprintf("%s[%d]", fpath, j), alloc, visit); err != nil {
+					if err := walkTaggedStruct(ev.Elem(), fmt.Sprintf("%s[%d]", fpath, j), childYaml, childAddr, alloc, visit); err != nil {
 						return err
 					}
 				}
@@ -231,12 +247,45 @@ func walkTaggedStruct(v reflect.Value, path string, alloc bool, visit func(refle
 	return nil
 }
 
+// yamlChildPath 依据 yaml tag 推出子字段的 yaml 键路径口径（与严格模式诊断
+// UnknownKeyError.Path 一致）。
+//
+// 返回四项：
+//
+//   - fyaml：字段自身的 yaml 键路径（父路径 + yaml 键）；
+//   - faddr：字段是否可按 yaml 键路径寻址——`yaml:"-"` 的字段及其子树不可寻址
+//     （它们不出现在 yaml 里，也就没有对应的键路径）；`yaml:",inline"` 的字段
+//     **自身**也不可寻址（它被拍平进父级，没有自己的键），但它的**子字段**可寻址
+//     （路径 = 父路径 + 子字段自己的键）；
+//   - childYaml / childAddr：字段**子结构体**的 yaml 路径基准与可寻址性——
+//     inline 字段拍平到父级（子字段直接挂在父路径下，与 yaml.v3 的 inline
+//     语义一致）；`yaml:"-"` 的子树整体不可寻址。
+func yamlChildPath(sf reflect.StructField, parentYaml string, parentAddr bool) (fyaml string, faddr bool, childYaml string, childAddr bool) {
+	key := yamlKey(sf)
+	if key == "" {
+		// yaml:"-"：该字段不出现在 yaml 里，键路径不可寻址；子树同样不可寻址。
+		return "", false, "", false
+	}
+	if !parentAddr {
+		// 父级不可寻址（yaml:"-" 子树）→ 子级同样不可寻址。
+		return "", false, "", false
+	}
+	if yamlInline(sf) {
+		// inline：字段自身没有 yaml 键（拍平进父级），子字段挂到父路径下。
+		return parentYaml, false, parentYaml, true
+	}
+	fyaml = key
+	if parentYaml != "" {
+		fyaml = parentYaml + "." + key
+	}
+	return fyaml, true, fyaml, true
+}
+
 // structHasTargetTags 递归判断结构体类型（含嵌套 struct/*struct/[]struct）中
 // 是否存在任一目标 tag 的字段；seen 防御递归类型。
 func structHasTargetTags(t reflect.Type) bool {
 	return typeHasTargetTags(t, map[reflect.Type]bool{})
 }
-
 func typeHasTargetTags(t reflect.Type, seen map[reflect.Type]bool) bool {
 	if t == nil || seen[t] {
 		return false
@@ -297,15 +346,19 @@ func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string, set
 // applyEnvField 是 ApplyEnv 的单字段处理：env 已设置（非空）且字段为零值时，
 // 按字段类型解析环境变量值并写入。FieldSet 命中的路径（yaml 显式提供）不覆盖；
 // 成功写入后补记进 FieldSet。
-func applyEnvField(sf reflect.StructField, fv reflect.Value, path string, set FieldSet) error {
-	name, ok := sf.Tag.Lookup("env")
-	if !ok || name == "" {
+//
+// env 名按 EnvNaming 的顺序解析（覆盖表 → env tag → 路径派生名，见 envnaming.go）：
+// 覆盖表命中即用表里的绝对名；否则用 env tag（有前缀则加前缀）；都没有且设了
+// 前缀时按 yaml 键路径派生名。
+func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool, set FieldSet, n EnvNaming) error {
+	binding := resolveEnvName(sf, yamlPath, addr, n)
+	if binding.name == "" {
 		return nil
 	}
 	if set.Has(path) {
 		return nil // yaml 显式值优先（含显式零值）
 	}
-	raw, ok := os.LookupEnv(name)
+	raw, ok := os.LookupEnv(binding.name)
 	if !ok {
 		return nil
 	}
@@ -316,7 +369,7 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path string, set Fi
 	if !isZeroValue(fv) {
 		return nil // yaml 显式值优先
 	}
-	if err := setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", name, raw), path); err != nil {
+	if err := setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", binding.name, raw), path); err != nil {
 		return err
 	}
 	if set != nil {
@@ -327,15 +380,15 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path string, set Fi
 
 // validateTagFields 是 ValidateTags 的单字段处理：依次执行 require、range、
 // options 与 env 卫生检查。
-func validateTagFields(sf reflect.StructField, fv reflect.Value, path string, set FieldSet, envSeen map[string]string, envNamingLint bool) error {
-	if err := validateRequireField(sf, fv, path, set); err != nil {
+func validateTagFields(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool, set FieldSet, envSeen map[string]envSeenEntry, envNamingLint bool, n EnvNaming) error {
+	if err := validateRequireField(sf, fv, path, set, yamlPath, addr, n); err != nil {
 		return err
 	}
-	if err := validateEnvField(sf, path, envSeen); err != nil {
+	if err := validateEnvField(sf, path, yamlPath, addr, envSeen, n); err != nil {
 		return err
 	}
 	if envNamingLint {
-		if err := validateEnvNaming(sf, path); err != nil {
+		if err := validateEnvNaming(sf, path, yamlPath, addr, n); err != nil {
 			return err
 		}
 	}
@@ -354,7 +407,14 @@ func validateTagFields(sf reflect.StructField, fv reflect.Value, path string, se
 
 // validateEnvNaming 纯静态命名一致性：声明的 env 名应与由 yaml key（缺省字段名）
 // 推导的约定名一致。有意自定义名请打 `ignorederived:"true"`。
-func validateEnvNaming(sf reflect.StructField, path string) error {
+//
+// 启用命名策略后（见 envnaming.go），约定名口径随之变化：
+//
+//   - 覆盖表命中的字段：名字由表决定，**豁免**本检查（表里写的就是最终名）；
+//   - 设了前缀：约定名 = 前缀 + 路径派生名，故检查「去前缀后的 tag」是否等于
+//     路径派生名——tag 是显式声明，与「前缀即约定」的口径一致才算一致；
+//   - 未启用策略：口径与历史完全一致（叶子键派生名）。
+func validateEnvNaming(sf reflect.StructField, path, yamlPath string, addr bool, n EnvNaming) error {
 	name, ok := sf.Tag.Lookup("env")
 	if !ok || name == "" {
 		return nil
@@ -362,7 +422,17 @@ func validateEnvNaming(sf reflect.StructField, path string) error {
 	if _, skip := sf.Tag.Lookup("ignorederived"); skip {
 		return nil
 	}
+	// 覆盖表命中的字段：最终名由表决定，不参与派生名一致性检查。
+	if addr && n.Overrides != nil {
+		if _, hit := n.Overrides[yamlPath]; hit {
+			return nil
+		}
+	}
 	derived := derivedEnvName(sf)
+	if n.Prefix != "" && addr {
+		// 前缀策略下的约定名是**路径级**派生名（去前缀后比对）。
+		derived = derivedPathEnvName(yamlPath)
+	}
 	if derived == "" || derived == name {
 		return nil
 	}
@@ -372,13 +442,17 @@ func validateEnvNaming(sf reflect.StructField, path string) error {
 // LintEnvNaming 静态扫描 env tag 与推导约定名不一致的字段，返回诊断行
 // （不读进程环境、不 fail-closed）。适合 CI/lint 脚本或启动前自检。
 // 有意自定义名请打 `ignorederived:"true"`。
-func LintEnvNaming(v any) ([]string, error) {
+//
+// 可传 WithEnvNaming 启用命名策略口径：覆盖表命中的字段豁免；设了前缀则按
+// **路径级**派生名比对（与运行时实际读的变量名同口径）。
+func LintEnvNaming(v any, opts ...PassOption) ([]string, error) {
 	rv, err := targetStructValue(v, "LintEnvNaming")
 	if err != nil {
 		return nil, err
 	}
+	n := buildPassConfig(opts).envNaming
 	var out []string
-	walk := func(sf reflect.StructField, fv reflect.Value, path string) error {
+	walk := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
 		name, ok := sf.Tag.Lookup("env")
 		if !ok || name == "" {
 			return nil
@@ -386,14 +460,22 @@ func LintEnvNaming(v any) ([]string, error) {
 		if _, skip := sf.Tag.Lookup("ignorederived"); skip {
 			return nil
 		}
+		if addr && n.Overrides != nil {
+			if _, hit := n.Overrides[yamlPath]; hit {
+				return nil
+			}
+		}
 		derived := derivedEnvName(sf)
+		if addr && n.Prefix != "" {
+			derived = derivedPathEnvName(yamlPath)
+		}
 		if derived == "" || derived == name {
 			return nil
 		}
 		out = append(out, fmt.Sprintf("field %q: env tag %q differs from derived name %q", path, name, derived))
 		return nil
 	}
-	if err := walkTaggedStruct(rv, "", false, walk); err != nil {
+	if err := walkTaggedStruct(rv, "", "", true, false, walk); err != nil {
 		return nil, fmt.Errorf("config: LintEnvNaming: %w", err)
 	}
 	return out, nil
@@ -401,7 +483,10 @@ func LintEnvNaming(v any) ([]string, error) {
 
 // validateRequireField 校验 require 字段确实由外部提供。带 FieldSet 时以
 // 「yaml/env 显式」为准（显式零值算通过）；不带 FieldSet 退化为非零检查。
-func validateRequireField(sf reflect.StructField, fv reflect.Value, path string, set FieldSet) error {
+//
+// 错误信息里的 env 变量名按命名策略解析后的**最终名**给出（见 envnaming.go）——
+// 否则提示的名字不是真正生效的那个，等于把人指向错误的变量。
+func validateRequireField(sf reflect.StructField, fv reflect.Value, path string, set FieldSet, yamlPath string, addr bool, n EnvNaming) error {
 	if _, ok := sf.Tag.Lookup("require"); !ok {
 		return nil
 	}
@@ -410,8 +495,8 @@ func validateRequireField(sf reflect.StructField, fv reflect.Value, path string,
 			return nil
 		}
 		source := "yaml"
-		if name, ok := sf.Tag.Lookup("env"); ok && name != "" {
-			source = fmt.Sprintf("yaml or env %s", name)
+		if binding := resolveEnvName(sf, yamlPath, addr, n); binding.name != "" {
+			source = fmt.Sprintf("yaml or env %s", binding.name)
 		}
 		return fmt.Errorf("field %q: required but not provided (set %s)", path, source)
 	}
@@ -421,22 +506,41 @@ func validateRequireField(sf reflect.StructField, fv reflect.Value, path string,
 	return nil
 }
 
-// validateEnvField 校验 env tag 静态卫生：变量名格式、同名重复。
+// validateEnvField 校验 env 名的静态卫生：变量名格式、同名重复。
 // 不读进程环境——依赖运行环境的“拼写冒烟检查”会误报 PATH/HOME 等系统变量、
 // 且漏掉无人设置的真拼写错误（见 core#8），已改为可选的 LintEnvNaming。
-func validateEnvField(sf reflect.StructField, path string, envSeen map[string]string) error {
-	name, ok := sf.Tag.Lookup("env")
-	if !ok || name == "" {
+//
+// 校验对象是**最终生效的 env 名**（覆盖表 / 前缀 / tag 解析之后，见 envnaming.go）——
+// 校验声明名而不校验生效名，等于放行了一个永远 miss 的变量名。
+//
+// 重名判定按 **yaml 键路径**去重：同一个 env 名落在**不同** yaml 路径上是歧义
+// （两个字段抢同一个变量，必有一个静默拿不到值），报错；落在**同一** yaml 路径上
+// 是同一逻辑字段的多个实例（切片元素），不报错——否则任何 `[]struct` 配置配上
+// env tag 或前缀都会被误判。
+func validateEnvField(sf reflect.StructField, path, yamlPath string, addr bool, envSeen map[string]envSeenEntry, n EnvNaming) error {
+	binding := resolveEnvName(sf, yamlPath, addr, n)
+	if binding.name == "" {
 		return nil
 	}
-	if !envNamePattern.MatchString(name) {
-		return fmt.Errorf("field %q: env tag %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, name)
+	if !envNamePattern.MatchString(binding.name) {
+		return fmt.Errorf("field %q: env name %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, binding.name)
 	}
-	if prev, dup := envSeen[name]; dup {
-		return fmt.Errorf("field %q: env tag %q already used by field %q", path, name, prev)
+	if prev, dup := envSeen[binding.name]; dup {
+		if prev.yamlPath == yamlPath {
+			return nil // 同一逻辑字段的多个实例（切片元素）
+		}
+		return fmt.Errorf("field %q: env name %q already used by field %q", path, binding.name, prev.path)
 	}
-	envSeen[name] = path
+	envSeen[binding.name] = envSeenEntry{path: path, yamlPath: yamlPath}
 	return nil
+}
+
+// envSeenEntry 记录某个 env 名首次出现的字段。
+type envSeenEntry struct {
+	// path 首次出现的 Go 字段路径（错误信息用）。
+	path string
+	// yamlPath 首次出现的 yaml 键路径（重名去重用——同一逻辑字段的多个实例不算重名）。
+	yamlPath string
 }
 
 // setScalarFromString 把字符串 s 按字段类型解析后写入 fv。

@@ -52,7 +52,7 @@ func unmarshalInto(data []byte, dst any, o loadOptions) error {
 	if err := unmarshalConfig(expanded, dst, o); err != nil {
 		return &parseErr{err: err}
 	}
-	if err := applyTagPasses(dst, expanded); err != nil {
+	if err := applyTagPasses(dst, expanded, o.envNaming); err != nil {
 		return &tagErr{err: err}
 	}
 	return nil
