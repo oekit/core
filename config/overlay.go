@@ -96,9 +96,11 @@ func deepMergeMaps(a, b map[string]any) map[string]any {
 // env 未设置的字段不影响 dst（overlay 对应字段为零值，OverlayMerge 跳过）。
 // 注意：OverlayMerge 是「非零值才覆盖」，env 显式配置零值（如 APP_PORT=0）
 // 无法把文件里的非零值清成零——零值歧义与 ApplyEnv 一致，见 tags.go 文档。
-func ApplyEnvOverlay[T any](dst *T) error {
+//
+// 可传 WithEnvNaming 启用 env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
+func ApplyEnvOverlay[T any](dst *T, opts ...PassOption) error {
 	var overlay T
-	if err := ApplyEnv(&overlay); err != nil {
+	if err := ApplyEnv(&overlay, opts...); err != nil {
 		return err
 	}
 	OverlayMerge(dst, &overlay)

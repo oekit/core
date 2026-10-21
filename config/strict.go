@@ -60,6 +60,8 @@ type LoadOption func(*loadOptions)
 
 type loadOptions struct {
 	strict bool
+	// envNaming env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
+	envNaming EnvNaming
 }
 
 // WithStrict 严格模式：**未知键直接拒载**，不做静默忽略。

@@ -2,6 +2,45 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.12.0] — 2026-10-22
+
+### feat(config): env 命名策略——全局前缀 + 逐字段覆盖（[#32](https://github.com/oekit/core/issues/32)）
+- 字段的 env 变量名此前只能由结构体作者逐字段写死（`env:"NAME"` tag），
+  「约定名」（由 yaml 键推导的 SCREAMING_SNAKE）只被 `LintEnvNaming` /
+  `WithEnvNamingLint` 用来**检查**名字是否一致，并不能**决定**实际读的变量名。
+  于是两类宿主接不上：用统一前缀的 12-factor 宿主（`PB_` / `APP_` / `SVC_`）
+  必须给每个字段手写 tag，且**无法**让没打 tag 的字段也按约定参与 env 读取；
+  历史 env 名与 yaml 键对不上、需保留兼容的宿主则只能改结构体 tag——
+  结构体不是自己的就改不动。
+- 新增 `EnvNaming` 策略（前缀 + 逐字段覆盖）与三个入口：
+  - `WithEnvPrefix(prefix string) LoadOption`——全局前缀，加在**本包推导的名字**
+    上（env tag 名与路径派生名），覆盖表里的名字是绝对名不受影响；
+    `WithEnvPrefix("PB_")` 后 yaml 键 `upload.local_import.enabled` 读
+    `PB_UPLOAD_LOCAL_IMPORT_ENABLED`。
+  - `WithEnvOverrides(m map[string]string) LoadOption`——逐字段指定 env 变量名，
+    键为 **yaml 键路径**（与严格模式诊断路径同口径：嵌套用 `.` 连接、切片元素
+    不编号、`yaml:",inline"` 的子字段拍平到父级），值为空串表示**该字段不走
+    env**（显式豁免，压过 env tag 与前缀）。
+  - `WithEnvNaming(n EnvNaming) PassOption`——给单独调用 `ApplyEnv` /
+    `ValidateTags` / `ApplyEnvOverlay` / `ApplyTagPasses` 的场景（12-factor 的
+    env 优先接线走 `ApplyEnvOverlay`）。
+- 名字解析顺序：覆盖表 → env tag → 路径派生名。**未启用策略时行为与历史逐字
+  一致**：只有打了 env tag 的字段读 env。加了前缀后多一层能力——没打 env tag
+  的字段也按路径派生名参与 env 读取（「前缀即约定」，宿主不必逐字段写 tag）。
+- 命名一致性检查（`WithEnvNamingLint` / `LintEnvNaming`）在新策略下同步调整：
+  覆盖表命中的字段豁免（最终名由表决定）；设了前缀时约定名改用**路径级**
+  派生名（与运行时实际读的变量名同口径），前缀相同的两条路径派生名撞车
+  （`a.b` 与 `a_b` 都推出 `A_B`）会被判为重名。
+- env 卫生检查改为校验**最终生效的名字**（覆盖表 / 前缀 / tag 解析之后），
+  而非声明名——校验声明名而不校验生效名，等于放行了一个永远 miss 的变量名；
+  非法前缀与非法覆盖名在 `ValidateTags` 阶段 fail-closed（否则就是「配了没
+  生效」的静默失效）。重名判定按 yaml 键路径去重：同一逻辑字段的多个实例
+  （切片元素）不再被误判为重名。
+- `require` 字段缺失时的错误提示改为指向**真正生效**的变量名（加前缀后不再
+  指向那个不生效的旧名）。
+- `ApplyEnvOverlay` / `ApplyTagPasses` / `LintEnvNaming` 新增可选策略参数
+  （变参形式，既有调用方零改动）。
+
 ## [v0.11.0] — 2026-10-21
 
 ### feat(config): 加载入口按来源拆开——`LoadFile`（任意路径）/ `Unmarshal`（字节源）（[#25](https://github.com/oekit/core/issues/25)）
