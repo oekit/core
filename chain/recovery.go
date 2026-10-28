@@ -47,7 +47,14 @@ func Recovery(opts ...RecoveryOption) Middleware {
 					resp, err = nil, &pv
 				}
 			}()
-			return next(ctx, req)
+			resp, err = next(ctx, req)
+			// 下游以 *PanicError **形式返回**（例如下游中间的 Timeout 已把 panic
+			// 收编成错误再往上抛）⇒ 同样走上报钩子，与「直接 panic」的路径
+			// 口径一致（否则这类 panic 不会出现在 Sentry 等上报里）。
+			if pe, ok := err.(*PanicError); ok && cfg.reporter != nil {
+				cfg.reporter(ctx, req, *pe)
+			}
+			return resp, err
 		}
 	}
 }

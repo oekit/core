@@ -142,6 +142,11 @@ func (m *Manager) Listen(signals ...os.Signal) {
 	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, signals...)
+	// **必须 Stop**：signal.Notify 会把对应信号的默认行为（终止进程）关掉。
+	// 不 Stop 的话，Listen 返回后这些信号仍被捕获进这个没人读的 channel ⇒
+	// **第二次 Ctrl-C / 容器 SIGTERM 不再能终止进程**，编排器只能升级到
+	// SIGKILL 才能收尸。
+	defer signal.Stop(ch)
 	sig := <-ch
 	m.logger.Info("received signal", "signal", sig)
 	m.Shutdown(context.Background())

@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 )
 
@@ -23,6 +24,21 @@ func Timeout(d time.Duration) Middleware {
 			}
 			done := make(chan result, 1) // 带缓冲：超时路径不阻塞下游完成回传
 			go func() {
+				// **在 goroutine 内 recover**：本中间件把下游放到新 goroutine 执行，
+				// 而 Recovery 的 recover 装在**调用方** goroutine 上 ⇒ 下游 panic
+				// 根本到不了 Recovery，会**打死整个进程**（panic 发生在无人 recover
+				// 的 goroutine 里）。canonical 组合
+				// `chain.Finalize(h, chain.Recovery(), chain.Timeout(d))` 正是这个
+				// 顺序 ⇒ Recovery 的 godoc「下游 panic 被转换为 *PanicError 返回…
+				// 而非进程崩溃」在组合使用时是假的。
+				//
+				// 恢复成 *PanicError 返回 ⇒ 外层的 Recovery 认得它（Recovery 接受
+				// *PanicError），错误语义与直接调用 Recovery 一致。
+				defer func() {
+					if r := recover(); r != nil {
+						done <- result{err: &PanicError{Value: r, Stack: string(debug.Stack())}}
+					}
+				}()
 				r, err := next(ctx, req)
 				done <- result{resp: r, err: err}
 			}()
