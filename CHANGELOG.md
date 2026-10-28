@@ -2,6 +2,11 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.12.1] — 2026-10-28
+
+- fix(chain): `Timeout` 把下游放到新 goroutine 执行，而 `Recovery` 的 recover 装在**调用方** goroutine 上 ⇒ 下游 panic 根本到不了 Recovery，会打死整个进程（canonical 组合 `chain.Finalize(h, chain.Recovery(), chain.Timeout(d))` 正是这个顺序 ⇒ Recovery 的 godoc 在组合使用时是假的）。修法：在 Timeout 的 goroutine 内 recover 并返回 `*PanicError`；`Recovery` 对下游以 `*PanicError` **形式返回**的情况也走上报钩子
+- fix(lifecycle): `Listen` 补 `defer signal.Stop(ch)`——`signal.Notify` 会关掉信号的默认行为（终止进程），不 Stop 的话 Listen 返回后第二次 Ctrl-C / 容器 SIGTERM 不再能终止进程，编排器只能升级到 SIGKILL 才能收尸
+
 ## [v0.12.0] — 2026-10-22
 
 ### feat(config): env 命名策略——全局前缀 + 逐字段覆盖（[#32](https://github.com/oekit/core/issues/32)）
