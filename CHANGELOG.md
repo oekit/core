@@ -17,7 +17,7 @@
   必须给每个字段手写 tag，且**无法**让没打 tag 的字段也按约定参与 env 读取；
   历史 env 名与 yaml 键对不上、需保留兼容的宿主则只能改结构体 tag——
   结构体不是自己的就改不动。
-- 新增 `EnvNaming` 策略（前缀 + 逐字段覆盖）与三个入口：
+- #32：新增 `EnvNaming` 策略（前缀 + 逐字段覆盖）与三个入口：
   - `WithEnvPrefix(prefix string) LoadOption`——全局前缀，加在**本包推导的名字**
     上（env tag 名与路径派生名），覆盖表里的名字是绝对名不受影响；
     `WithEnvPrefix("PB_")` 后 yaml 键 `upload.local_import.enabled` 读
@@ -57,7 +57,7 @@
   实锤：argus（v3.159.0）评估后接不上，退回 `yaml.v3` 的 `KnownFields(true)`——
   拒载语义有了，但**嵌套路径、合法键清单、拼写建议这三样最有价值的诊断全丢了**，
   等于 #20 的核心收益对这类宿主不可达。
-- 新增两个入口：
+- #25：新增两个入口：
   - `LoadFile(path string, dst any, opts ...LoadOption) error`——**任意路径**；
   - `Unmarshal(data []byte, dst any, opts ...LoadOption) error`——**字节源**。
 - **三个入口共享同一条解码线**（`unmarshalInto`：展开 `${VAR}` → 可选严格判定 →
