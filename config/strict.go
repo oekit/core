@@ -73,6 +73,10 @@ type loadOptions struct {
 //
 //	config: 未知配置键 "llm.base_ur"（是否想写 "base_url"？）；该层合法键：
 //	base_url, timeout_ms, api_key
+//
+// YAML merge key（`<<` 锚点合并，#47）是规范内的合法语法，不拦；merge 内容
+// 按**本层类型**继续校验——展开后的未知键照样拒载。锚点挂在未知键上（如
+// `_base: &base ...` 的顶层草稿键）仍按未知键拒载——那是真未知键，不是语法。
 func WithStrict() LoadOption {
 	return func(o *loadOptions) { o.strict = true }
 }
@@ -237,6 +241,16 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 			if key.Kind != yaml.ScalarNode {
 				continue
 			}
+			// YAML merge key（#47）：`<<` 是规范内的合法合并语法，不是拼错的键——
+			// 严格模式拦**拼错的键**，不拦**合法语法**。merge 的语义是「把映射
+			// 内容并入当前层」，故其值按**本层类型**继续校验：merge 展开后的
+			// 未知键依然逃不过严格模式（比「整段跳过」的放行更严丝合缝）。
+			if key.Value == "<<" {
+				if err := walkStrictMergeValue(val, t, path); err != nil {
+					return err
+				}
+				continue
+			}
 			info, ok := fields[key.Value]
 			if !ok {
 				return &UnknownKeyError{
@@ -271,6 +285,22 @@ func joinPath(path, key string) string {
 		return key
 	}
 	return path + "." + key
+}
+
+// walkStrictMergeValue 校验 merge key（`<<`）的值。yaml 规范允许两种形态：
+// 单映射（含锚点别名，walkStrict 的 AliasNode 分支自动解引）与映射序列
+// （多锚点按序合并）。其余形态（非法配置）交回 walkStrict 按默认分支放行，
+// 由后续 yaml.v3 解码给出语法层错误。
+func walkStrictMergeValue(val *yaml.Node, t reflect.Type, path string) error {
+	if val.Kind == yaml.SequenceNode {
+		for _, child := range val.Content {
+			if err := walkStrict(child, t, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walkStrict(val, t, path)
 }
 
 func fieldTypeAt(t reflect.Type, index []int) reflect.Type {

@@ -1,3 +1,9 @@
+## [v0.12.2] — 2026-11-05
+
+- fix(config): `WithStrict` 拒绝 YAML merge key（`<<`）⇒ 合法锚点合并配置无法加载（[#47](https://github.com/oekit/core/issues/47)）——`<<` 是 YAML 规范内的合法合并语法、yaml.v3 解码层原生支持，严格模式的职责是拦**拼错的键**，不该拦**合法语法**；修复前多环境 base+override 这类公共段复用配置在严格模式下一律拒载，错误信息还把 `<<` 列为「是否想写别的」的拼错候选，误导排查方向（下游 bianque 因此被迫自叉一份严格递归）。修法：`walkStrictMapping` 对 `<<` 放行键名校验，merge 值按**本层类型**继续走严格递归（比「整段跳过」更严丝合缝——merge 展开后的未知键依然拒载）；覆盖 yaml 规范的两种形态：单映射（含锚点别名，AliasNode 自动解引）与映射序列（多锚点按序合并）。锚点挂在未知键上（`_base: &base ...` 的顶层草稿键）仍按未知键拒载——那是真未知键，不是语法。补 6 个回归用例（merge 放行/内容校验/别名/序列/草稿键仍拒载）
+
+关联问题单：core#47。
+
 # Changelog — oekit/core
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。

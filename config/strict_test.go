@@ -228,3 +228,157 @@ func TestStrictMatchesYAMLv3FieldSemantics(t *testing.T) {
 		t.Fatalf("合法键应为 [inner]，实际 %v", uerr.Legal)
 	}
 }
+
+// ---- YAML merge key（#47）：合法语法放行，merge 内容仍受严格校验 ----
+
+// TestStrictAcceptsMergeKey 锁定 #47 主形态：`<<: &anchor` 合法锚点合并配置
+// 必须能加载（修复前报「未知配置键 "inner.<<"」，且把 `<<` 列为拼错候选）。
+func TestStrictAcceptsMergeKey(t *testing.T) {
+	type Inner struct {
+		A string `yaml:"a"`
+	}
+	type Cfg struct {
+		Name  string `yaml:"name"`
+		Inner Inner  `yaml:"inner"`
+	}
+	var c Cfg
+	err := Unmarshal([]byte("name: x\ninner:\n  <<: &d\n    a: 1\n"), &c, WithStrict())
+	if err != nil {
+		t.Fatalf("merge key 合法配置不应拒载：%v", err)
+	}
+	if c.Inner.A != "1" {
+		t.Fatalf("merge 内容应被解码：got %+v", c.Inner)
+	}
+}
+
+// TestStrictChecksMergedContent merge 内容按本层类型继续校验——展开后的未知键
+// 照样拒载（比「整段跳过」的放行更严丝合缝）。
+func TestStrictChecksMergedContent(t *testing.T) {
+	type Inner struct {
+		A string `yaml:"a"`
+	}
+	type Cfg struct {
+		Inner Inner `yaml:"inner"`
+	}
+	var c Cfg
+	err := Unmarshal([]byte("inner:\n  <<: &d\n    ar: 1\n"), &c, WithStrict())
+	if err == nil {
+		t.Fatal("merge 内容里的未知键应拒载")
+	}
+	var uke *UnknownKeyError
+	if !errors.As(err, &uke) || uke.Path != "inner.ar" {
+		t.Fatalf("应报 inner.ar 的 UnknownKeyError，got %v", err)
+	}
+}
+
+// TestStrictAcceptsAliasMerge 常规形态：锚点挂在已知键上、别名合并。
+// 注意锚点定义键（inner2）自身仍是合法键；merge 引用内容按 inner 类型校验。
+func TestStrictAcceptsAliasMerge(t *testing.T) {
+	type Inner struct {
+		A string `yaml:"a"`
+		B string `yaml:"b"`
+	}
+	type Cfg struct {
+		Base  Inner `yaml:"base"`
+		Inner Inner `yaml:"inner"`
+	}
+	var c Cfg
+	err := Unmarshal([]byte(`
+base: &base
+  a: 1
+  b: 2
+inner:
+  <<: *base
+  b: 3
+`), &c, WithStrict())
+	if err != nil {
+		t.Fatalf("别名合并不应拒载：%v", err)
+	}
+	if c.Inner.A != "1" || c.Inner.B != "3" {
+		t.Fatalf("merge + override 解码不符：%+v", c.Inner)
+	}
+}
+
+// TestStrictChecksAliasMergedContent 别名指向的内容里有未知键 → 拒载。
+func TestStrictChecksAliasMergedContent(t *testing.T) {
+	type Inner struct {
+		A string `yaml:"a"`
+	}
+	type Cfg struct {
+		Base  Inner `yaml:"base"`
+		Inner Inner `yaml:"inner"`
+	}
+	var c Cfg
+	err := Unmarshal([]byte(`
+base: &base
+  a: 1
+  typo: 9
+inner:
+  <<: *base
+`), &c, WithStrict())
+	// 注意：typo 在 base 键下先被校验拒载——错误指向 base.typo（同一次 walk 的
+	// 确定性首错），merge 引用侧同样会被拦
+	if err == nil {
+		t.Fatal("别名内容里的未知键应拒载")
+	}
+	var uke *UnknownKeyError
+	if !errors.As(err, &uke) {
+		t.Fatalf("应为 UnknownKeyError，got %v", err)
+	}
+}
+
+// TestStrictChecksMultiMergeSequence merge key 的序列形态（多锚点按序合并）。
+func TestStrictChecksMultiMergeSequence(t *testing.T) {
+	type Inner struct {
+		A string `yaml:"a"`
+		B string `yaml:"b"`
+	}
+	type Cfg struct {
+		Base1 Inner `yaml:"base1"`
+		Base2 Inner `yaml:"base2"`
+		Inner Inner `yaml:"inner"`
+	}
+	var c Cfg
+	err := Unmarshal([]byte(`
+base1: &b1
+  a: 1
+base2: &b2
+  b: 2
+inner:
+  <<: [*b1, *b2]
+`), &c, WithStrict())
+	if err != nil {
+		t.Fatalf("多锚点序列合并不应拒载：%v", err)
+	}
+	if c.Inner.A != "1" || c.Inner.B != "2" {
+		t.Fatalf("序列 merge 解码不符：%+v", c.Inner)
+	}
+
+	// 序列内容里的未知键同样拒载
+	err = Unmarshal([]byte(`
+base1: &b1
+  a: 1
+inner:
+  <<: [*b1, {typo: 2}]
+`), &c, WithStrict())
+	if err == nil {
+		t.Fatal("序列 merge 内容里的未知键应拒载")
+	}
+}
+
+// TestStrictStillRejectsUnknownAnchorHolder 锚点挂在未知顶层键上（`_base: &base ...`）
+// 仍按未知键拒载——那是真未知键，不是 merge 语法（issue 明确认可的合理行为）。
+func TestStrictStillRejectsUnknownAnchorHolder(t *testing.T) {
+	type Cfg struct {
+		Name string `yaml:"name"`
+	}
+	var c Cfg
+	err := Unmarshal([]byte("_base: &base\n  a: 1\nname: x\n"), &c, WithStrict())
+	if err == nil {
+		t.Fatal("未知键 _base 应拒载")
+	}
+	var uke *UnknownKeyError
+	if !errors.As(err, &uke) || uke.Key != "_base" {
+		t.Fatalf("应报 _base 的 UnknownKeyError，got %v", err)
+	}
+}
