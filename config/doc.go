@@ -8,6 +8,7 @@
 //   - Struct tag 增强：default/env/range/options 零值填充、环境变量注入与 fail-closed 校验
 //   - 反射合并：OverlayMerge 支持嵌套结构体和指针字段的深度合并
 //   - Nacos 集成：配合 nacos.LoadAndMerge 实现远程配置覆盖本地默认值
+//   - 热更快照：Snapshot[T] 原子发布已解析值，Get 永不返 nil，代次单调可观测
 //
 // # 快速接入
 //
@@ -143,6 +144,28 @@
 // 合法键判定与 yaml.v3 的字段语义**逐条对齐**（yaml tag 优先、无 tag 取小写
 // 字段名、显式 `,inline` 拍平、内嵌未导出类型同样处理）——不一致会把合法键
 // 误报成未知键。
+//
+// # 热更快照（Snapshot）
+//
+// `ConfigWatcher[T]` 管**来源**（Read/Watch/解析/重载节奏），它必须先 Reload 一次
+// 才有值，`Get` 在那之前返 nil。而大量热更入口并不实现 ConfigSource：Nacos 的
+// `Listen(func(*T))` 回调、K8s informer、管理端点的配置 POST——它们只是「把一份
+// 已解析好的值交过来」。这一格由 `Snapshot[T]` 接住：
+//
+//	var defaults = Config{Port: 8080}
+//	snap := config.NewSnapshot(&defaults) // 构造期注入默认值
+//	client.Listen(snap.Publish)           // func(*T) 直接当回调
+//	cur := snap.Get()                     // 永不 nil，读取方零判空
+//
+// 三条契约：**Get 永不返 nil**（默认值在构造期注入 ⇒ 判空样板不再随消费点扩散）；
+// **值与代次同生同灭**（`Load()` 拿到的一致一对，不会「新值配旧代次」）；
+// **代次单调唯一**（并发发布走 CAS，投影在发布单元上，回答「配置换过没有」——
+// 指针比对会被「相同内容重新发布」和 A→B→A 骗过）。
+//
+// 发布出去的值**视为不可变**：Get 返回的就是那个指针（零拷贝），发布者不得在
+// Publish 之后改它的字段。`Publish(nil)` 被忽略并保留上一份好值（Publish 必须
+// 无返回值才能当回调直接传，而它最常被调用的位置是别人 SDK 的 goroutine——
+// 那里没有我们的 recover）；想知道「有没有发布进去」，看 `Version()` 是否前进。
 //
 // # 配置文件约定
 //
