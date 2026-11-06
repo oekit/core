@@ -2,9 +2,48 @@ package chain
 
 import (
 	"context"
+	"log/slog"
 	"runtime/debug"
+	"sync"
 	"time"
 )
+
+// TimeoutOption 配置 Timeout 中间件。
+type TimeoutOption func(*timeoutConfig)
+
+type timeoutConfig struct {
+	latePanic func(ctx context.Context, pv *PanicError)
+}
+
+// WithLatePanicReporter 注入「超时已返回后下游才 panic」的上报钩子。
+//
+// 未注入时走 stdlib slog（component=chain.timeout）；需要对接 Sentry 等
+// 监控体系时注入本钩子。钩子在**panic 隔离**下调用（同 reportIsolated）。
+func WithLatePanicReporter(fn func(ctx context.Context, pv *PanicError)) TimeoutOption {
+	return func(c *timeoutConfig) { c.latePanic = fn }
+}
+
+// reportLate 上报「无人接收的迟到 panic」。
+func (c *timeoutConfig) reportLate(ctx context.Context, pv *PanicError) {
+	if c.latePanic != nil {
+		reportIsolatedPtr(c.latePanic, ctx, pv)
+		return
+	}
+	// 默认出口：超时路径的迟到 panic 若不落地就等于**彻底消失**——排障时
+	// 只剩「超时」一个假象，而真实原因是下游在 ctx 取消后崩了（典型形态：
+	// 取消后继续写已关闭的资源、nil 解引用）。这里必须留下痕迹。
+	slog.Default().With("component", "chain.timeout").Error(
+		"[panic] 超时返回后下游才 panic（错误已无调用方接收）",
+		"panic", pv.Value,
+		"stack", pv.Stack,
+	)
+}
+
+// reportIsolatedPtr 与 reportIsolated 同义，指针形态（Timeout 的钩子签名）。
+func reportIsolatedPtr(reporter func(context.Context, *PanicError), ctx context.Context, pv *PanicError) {
+	defer func() { _ = recover() }()
+	reporter(ctx, pv)
+}
 
 // Timeout 返回超时中间件：为下游派生带 deadline 的 ctx，超时先到即返回
 // context.DeadlineExceeded。
@@ -12,7 +51,18 @@ import (
 // 语义边界：与 go-kratos 相同——若下游 handler 不理会 ctx 取消（阻塞在
 // 不受 ctx 控制的 IO 上），超时返回后其 goroutine 仍在后台运行至自然结束，
 // 本中间件无法强制中断。
-func Timeout(d time.Duration) Middleware {
+//
+// 迟到结果（超时后下游才完成）的处置：
+//   - 普通结果 ⇒ 丢弃（超时胜出，既有语义不变）；
+//   - **panic ⇒ 走上报通道**（WithLatePanicReporter，缺省 stdlib slog）。
+//     不这么做的话，`Recovery(·)` 装在调用方 goroutine 上、而本中间件把下游
+//     放进了新 goroutine ⇒ 迟到的 *PanicError* 只写进一个**没人读**的缓冲
+//     channel ⇒ 不进错误链、不上报，观测面完全丢失。
+func Timeout(d time.Duration, opts ...TimeoutOption) Middleware {
+	cfg := &timeoutConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
 	return func(next Handler) Handler {
 		return func(ctx context.Context, req any) (any, error) {
 			ctx, cancel := context.WithTimeout(ctx, d)
@@ -23,6 +73,30 @@ func Timeout(d time.Duration) Middleware {
 				err  error
 			}
 			done := make(chan result, 1) // 带缓冲：超时路径不阻塞下游完成回传
+
+			// returned 标记「调用方已放弃等待」。下游 goroutine 据此判断自己
+			// 那笔结果是否还有人接收。**「读走 done」与「置位 returned」在
+			// 同一把锁下**，所以二者恰好一方生效：既不双报（迟到 panic 既
+			// 被读走又被上报），也不静默丢弃（两边都以为对方管）。
+			//
+			// 只用 atomic.Bool 不够：goroutine 侧「发送 → 检查」与调用方侧
+			// 「置位 → 读取」是两对操作的交叉，无锁时存在「发进缓冲、却
+			// 无人读且不认为自己是迟到」的窗口。
+			var mu sync.Mutex
+			returned := false
+
+			deliver := func(res result, pv *PanicError) {
+				mu.Lock()
+				abandoned := returned
+				if !abandoned {
+					done <- res // 缓冲 1 且只写一次 ⇒ 永不阻塞
+				}
+				mu.Unlock()
+				if abandoned && pv != nil {
+					cfg.reportLate(ctx, pv)
+				}
+			}
+
 			go func() {
 				// **在 goroutine 内 recover**：本中间件把下游放到新 goroutine 执行，
 				// 而 Recovery 的 recover 装在**调用方** goroutine 上 ⇒ 下游 panic
@@ -36,17 +110,34 @@ func Timeout(d time.Duration) Middleware {
 				// *PanicError），错误语义与直接调用 Recovery 一致。
 				defer func() {
 					if r := recover(); r != nil {
-						done <- result{err: &PanicError{Value: r, Stack: string(debug.Stack())}}
+						pv := &PanicError{Value: r, Stack: string(debug.Stack())}
+						deliver(result{err: pv}, pv)
 					}
 				}()
 				r, err := next(ctx, req)
-				done <- result{resp: r, err: err}
+				deliver(result{resp: r, err: err}, nil)
 			}()
 
 			select {
 			case r := <-done:
 				return r.resp, r.err
 			case <-ctx.Done():
+				mu.Lock()
+				returned = true
+				var late *PanicError
+				select {
+				case r := <-done:
+					// 下游恰好在此刻完成。panic 照样没人接收 ⇒ 上报；
+					// 普通结果按既有语义丢弃（超时胜出）。
+					if pv, ok := r.err.(*PanicError); ok {
+						late = pv
+					}
+				default:
+				}
+				mu.Unlock()
+				if late != nil {
+					cfg.reportLate(ctx, late)
+				}
 				return nil, ctx.Err()
 			}
 		}
