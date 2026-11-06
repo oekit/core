@@ -134,8 +134,20 @@ func (m *Manager) AddTeardown(fn func()) {
 	m.teardowns = append(m.teardowns, fn)
 }
 
-// Listen 监听系统信号，收到信号后执行关闭。
-// 会阻塞直到所有资源关闭完成或超时。
+// Listen 监听系统信号，收到信号后执行**优雅关闭**：
+// 停止接受新请求 → 排空在飞请求（Drain）→ 执行 teardown/closer。
+// 会阻塞直到排空完成、所有资源关闭完成或各自超时。
+//
+// 为什么必须排空：Shutdown 只「停收新请求 + 跑清理任务」，**不等
+// refCount 归零**。用 Acquire/Release 管理请求生命周期的服务若直接
+// Shutdown，会在在飞请求还握着资源时把资源关掉——请求报错、连接被重置。
+// 此前 Listen 正是直接调 Shutdown，而 Drain 的文档要求它插在「停收新请求
+// 之后、关资源之前」，阻塞式的 Listen 却没给调用方任何插入位置 ⇒ 按推荐
+// 用法接 Listen 的服务**永远不排空**。
+//
+// 排空时长由 SetDrainTimeout 控制（默认 30s）。排空期间再收到一个信号
+// （编排器连发两次 SIGTERM、运维连按两次 Ctrl-C）立即放弃等待并进入资源
+// 关闭——第二枪的语义就是「别等了，现在就关」。
 func (m *Manager) Listen(signals ...os.Signal) {
 	if len(signals) == 0 {
 		signals = []os.Signal{os.Interrupt}
@@ -147,9 +159,55 @@ func (m *Manager) Listen(signals ...os.Signal) {
 	// **第二次 Ctrl-C / 容器 SIGTERM 不再能终止进程**，编排器只能升级到
 	// SIGKILL 才能收尸。
 	defer signal.Stop(ch)
+	m.listenLoop(ch)
+}
+
+// listenLoop 是 Listen 的心跳：等第一个信号 → 停收新请求 → 排空 → 关闭资源。
+// 抽成独立方法（而非内联在 Listen 里）是为了让「信号 → 排空 → 关闭」这段
+// **顺序契约**能被单元测试直接驱动：测试只需自己往 ch 里塞信号，
+// 不必真的 kill 进程（真信号在 register 完成前送达会按默认行为终止进程，
+// 那样的测试既不可靠也不安全）。
+func (m *Manager) listenLoop(ch <-chan os.Signal) {
 	sig := <-ch
 	m.logger.Info("received signal", "signal", sig)
+
+	// 顺序不可颠倒：先停收新请求，再排空。accepting 仍为 true 时 refCount
+	// 会持续被新请求抬起 ⇒ drain 永远等不到归零（只能在 drainTimeout 上
+	// 空等到超时，等于没排空）。
+	m.stopAccepting()
+	m.drainWithSignal(ch)
+
 	m.Shutdown(context.Background())
+}
+
+// stopAccepting 停止接受新请求（幂等）。
+// Acquire 与 Shutdown/Listen 共用此入口，保证「读 accepting」与
+// 「refCount 递增」互斥，不会漏算正在进行中的请求。
+func (m *Manager) stopAccepting() {
+	m.acqMu.Lock()
+	m.accepting.Store(false)
+	m.acqMu.Unlock()
+}
+
+// drainWithSignal 阻塞式排空在飞请求；abort 上收到信号即放弃等待。
+func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		m.Drain(ctx)
+	}()
+
+	select {
+	case <-drained:
+	case sig := <-abort:
+		m.logger.Warn("received signal during drain, closing anyway",
+			"signal", sig, "pending", m.GetRefCount())
+		cancel()
+		<-drained // 等 Drain 观察到取消并返回，避免与其日志/状态竞争
+	}
 }
 
 // Shutdown 执行所有注册的清理任务。
@@ -162,9 +220,7 @@ func (m *Manager) Listen(signals ...os.Signal) {
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.once.Do(func() {
 		// 1. 停止接受新请求（与 Acquire 互斥，确保不会有请求被漏算）
-		m.acqMu.Lock()
-		m.accepting.Store(false)
-		m.acqMu.Unlock()
+		m.stopAccepting()
 		m.logger.Info("stopped accepting new requests")
 
 		// 2. 先执行 teardowns
@@ -248,6 +304,10 @@ func (m *Manager) SetDrainTimeout(d time.Duration) {
 // Drain 等待所有进行中的请求完成。
 // 应在停止接受新请求之后、关闭资源之前调用。
 // 使用 Acquire/Release 管理请求生命周期时，Drain 会等待所有已 Acquire 的请求 Release。
+//
+// 信号驱动的 Listen 流程**已经自带**这一步（Listen → stopAccepting →
+// Drain → Shutdown），无需手工再调；只有自己编排关闭流程（如自己接管
+// signal.Notify）时才需要显式调用本方法。
 func (m *Manager) Drain(ctx context.Context) {
 	m.waitForRequests(ctx)
 }
