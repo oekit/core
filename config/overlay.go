@@ -90,19 +90,33 @@ func deepMergeMaps(a, b map[string]any) map[string]any {
 // 等价手写：
 //
 //	overlay := &T{}
-//	_ = ApplyEnv(overlay)        // 空结构体上解 env → env 非零值进入 overlay
-//	OverlayMerge(dst, overlay)   // overlay 的非零值压过 dst（文件值）
+//	set := FieldSet{}
+//	_ = ApplyEnv(overlay, WithFieldSet(set)) // 空结构体上解 env → 命中补记进 set
+//	OverlayMergeExplicit(dst, overlay, set)  // env 命中即覆盖（含显式零值）
 //
-// env 未设置的字段不影响 dst（overlay 对应字段为零值，OverlayMerge 跳过）。
-// 注意：OverlayMerge 是「非零值才覆盖」，env 显式配置零值（如 APP_PORT=0）
-// 无法把文件里的非零值清成零——零值歧义与 ApplyEnv 一致，见 tags.go 文档。
+// **env 命中即覆盖，含显式零值**（core#50）：`KUBOARD_MCP_ENABLED=false` 能把
+// 文件里的 true 关掉、`APP_PORT=0` 能把非零端口清零。此前走 OverlayMerge 的
+// 「非零值才覆盖」模型，env 显式设置的 false/0 落进 overlay 后被当零值跳过，
+// 永远压不过文件值——12-factor 宿主最常见的布尔开关表达法（`ENV=false 关功能`）
+// 因此静默失效，本函数现改走 OverlayMergeExplicit（显式集合逃生门，见 merge.go）。
+//
+// env 未设置（或显式空串/纯空白）的字段不影响 dst（不进命中集合）。
+// env 值无法按字段类型解析时 fail-closed 报错；可传 WithLenientEnv 转为
+// WARN + 跳过——被跳过的字段不进命中集合，不会用零值清掉 dst 的文件值
+// （见 fieldset.go）。
 //
 // 可传 WithEnvNaming 启用 env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
+// 注意：本函数内部自带 FieldSet 记录 env 命中路径，传入 WithFieldSet 会被
+// 覆盖（overlay 侧没有 yaml 显式值需要保护）。
 func ApplyEnvOverlay[T any](dst *T, opts ...PassOption) error {
 	var overlay T
-	if err := ApplyEnv(&overlay, opts...); err != nil {
+	set := FieldSet{}
+	overlayOpts := make([]PassOption, 0, len(opts)+1)
+	overlayOpts = append(overlayOpts, opts...)
+	overlayOpts = append(overlayOpts, WithFieldSet(set))
+	if err := ApplyEnv(&overlay, overlayOpts...); err != nil {
 		return err
 	}
-	OverlayMerge(dst, &overlay)
+	OverlayMergeExplicit(dst, &overlay, set)
 	return nil
 }

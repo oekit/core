@@ -292,3 +292,66 @@ func TestOverlayMerge_NilArgs(t *testing.T) {
 		t.Error("nil src must not modify dst")
 	}
 }
+
+// ---- OverlayMergeExplicit（core#50：显式零值合并逃生门） ----
+
+// TestOverlayMergeExplicit_ExplicitPathsOverrideEvenZero 钉住 core#50：
+// 显式集合命中的字段无条件取 src 值（含零值），未命中路径保持
+// 「非零值才覆盖」的历史语义。
+func TestOverlayMergeExplicit_ExplicitPathsOverrideEvenZero(t *testing.T) {
+	dst := &TestConfig{Name: "keep", Port: 8080, Enabled: true}
+	src := &TestConfig{} // 全零 overlay
+	OverlayMergeExplicit(dst, src, FieldSet{"Port": true})
+
+	if dst.Port != 0 {
+		t.Errorf("explicit path must override with zero, got %d", dst.Port)
+	}
+	if dst.Name != "keep" || !dst.Enabled {
+		t.Errorf("non-explicit paths must keep nonzero-only semantics, got %+v", *dst)
+	}
+}
+
+// TestOverlayMergeExplicit_NestedPath 集合支持嵌套路径（与 FieldSet 键同口径）。
+func TestOverlayMergeExplicit_NestedPath(t *testing.T) {
+	dst := &TestConfig{Nested: SubConfig{Host: "file-host", Port: 9000}}
+	src := &TestConfig{Nested: SubConfig{}} // Host 清空、Port 清零
+	OverlayMergeExplicit(dst, src, FieldSet{"Nested.Host": true})
+
+	if dst.Nested.Host != "" {
+		t.Errorf("explicit nested path must override with zero, got %q", dst.Nested.Host)
+	}
+	if dst.Nested.Port != 9000 {
+		t.Errorf("sibling non-explicit path must keep value, got %d", dst.Nested.Port)
+	}
+}
+
+// TestOverlayMergeExplicit_BoolOrBypassedOnlyForExplicit：显式命中压过
+// bool_or（OR 会把显式 false 错留在 true 上——env 命中即覆盖，core#50）；
+// 未命中的 bool_or 字段保持 OR 语义。
+func TestOverlayMergeExplicit_BoolOrBypassedOnlyForExplicit(t *testing.T) {
+	type cfg struct {
+		FeatureOn bool `merge:"bool_or"`
+		Fallback  bool `merge:"bool_or"`
+	}
+	dst := &cfg{FeatureOn: true, Fallback: true}
+	src := &cfg{} // 双 false
+	OverlayMergeExplicit(dst, src, FieldSet{"FeatureOn": true})
+
+	if dst.FeatureOn {
+		t.Error("explicit hit must take src false, bypassing bool_or")
+	}
+	if !dst.Fallback {
+		t.Error("non-explicit bool_or field must keep OR semantics (true)")
+	}
+}
+
+// TestOverlayMergeExplicit_NilSetMatchesOverlayMerge：集合为 nil 时与
+// OverlayMerge 完全等价（OverlayMerge 即这样委托的）。
+func TestOverlayMergeExplicit_NilSetMatchesOverlayMerge(t *testing.T) {
+	dst := &TestConfig{Name: "keep", Port: 8080}
+	src := &TestConfig{Port: 0}
+	OverlayMergeExplicit(dst, src, nil)
+	if dst.Port != 8080 || dst.Name != "keep" {
+		t.Errorf("nil set must behave like OverlayMerge, got %+v", *dst)
+	}
+}

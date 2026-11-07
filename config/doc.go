@@ -42,6 +42,12 @@
 // **与来源无关**——不会因为「不是从 etc/ 约定路径读的」就退化成一条
 // “field X not found in type Y”。
 //
+// `${VAR}` 展开是 YAML 解码前的**纯文本替换**，不感知标量上下文：值含换行
+// 会被折叠为空格、含 `#` 会被当注释截断。为避免「解析成功但值已损坏」的
+// 静默失败，这类值一律拒载（fail-closed，错误信息带变量名）——多行证书、
+// 含注释符的 token 请改经 ApplyEnvOverlay（结构体级 env 注入，无文本上下文
+// 问题）传入（core#59）。
+//
 // # Struct Tag 增强（default/env/range/options/require）
 //
 // LoadBootstrap 在 yaml unmarshal 之后依次执行 ApplyEnv → FillDefaults →
