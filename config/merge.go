@@ -11,13 +11,31 @@ import (
 //   - "bool_or": 布尔字段使用 OR 语义（dst || src），适用于 enable 标志
 //   - "zeroable": 零值视为有效值合并（而非跳过），适用于需要显式设置 0/""/false 的字段
 func OverlayMerge[T any](dst *T, src *T) {
+	OverlayMergeExplicit(dst, src, nil)
+}
+
+// OverlayMergeExplicit 在 OverlayMerge 之上接受**显式字段集合** explicit
+// （FieldSet，键为 Go 字段路径，与 tag 校验错误信息同格式：`Server.Port`）：
+// 命中路径的字段**无条件取 src 值（含零值）**，绕过「非零值才覆盖」与
+// merge tag 的 zeroable/bool_or 语义；未命中路径的行为与 OverlayMerge 完全一致
+// （explicit 为 nil 时二者等价）。
+//
+// 这是「显式零值」的合并逃生门（core#50）：非零覆盖模型无法表达「显式设置
+// 的 false/0 压过 dst 里的非零值」，而 12-factor 场景里 env 恰恰是用户意图
+// 最强的表达（`KUBOARD_MCP_ENABLED=false` 关功能）。ApplyEnvOverlay 用它实现
+// 「env 命中即覆盖」。
+//
+// 集合通常来自 ApplyEnv 对 FieldSet 的补记——只含标量 / []string 叶子路径；
+// 切片字段按整体替换（不递归到 `Items[0].Qty` 这类元素路径），struct 路径
+// 不参与（继续下推到叶子）。
+func OverlayMergeExplicit[T any](dst *T, src *T, explicit FieldSet) {
 	// nil 防护：reflect.ValueOf(nil 指针).Elem() 直接 panic
 	if dst == nil || src == nil {
 		return
 	}
 	dstVal := reflect.ValueOf(dst).Elem()
 	srcVal := reflect.ValueOf(src).Elem()
-	overlayFields(dstVal, srcVal)
+	overlayFields(dstVal, srcVal, "", explicit)
 }
 
 // isZeroable 检查 tag 是否包含 "zeroable"。
@@ -25,7 +43,9 @@ func isZeroable(tag string) bool {
 	return tag == "zeroable" || tag == "overwrite"
 }
 
-func overlayFields(dst, src reflect.Value) {
+// overlayFields 深度合并 src 到 dst；path 是当前层级的字段路径前缀，
+// explicit 命中的字段无条件取 src 值（含零值，见 OverlayMergeExplicit）。
+func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 	if dst.Kind() != reflect.Struct || src.Kind() != reflect.Struct {
 		return
 	}
@@ -38,48 +58,60 @@ func overlayFields(dst, src reflect.Value) {
 			continue
 		}
 
+		fpath := t.Field(i).Name
+		if path != "" {
+			fpath = path + "." + fpath
+		}
+		forced := explicit.Has(fpath)
+
 		tag := t.Field(i).Tag.Get("merge")
 
 		switch srcField.Kind() {
 		case reflect.String:
-			if isZeroable(tag) || srcField.String() != "" {
+			if forced || isZeroable(tag) || srcField.String() != "" {
 				dstField.SetString(srcField.String())
 			}
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			if isZeroable(tag) || srcField.Int() != 0 {
+			if forced || isZeroable(tag) || srcField.Int() != 0 {
 				dstField.SetInt(srcField.Int())
 			}
 		case reflect.Float32, reflect.Float64:
-			if isZeroable(tag) || srcField.Float() != 0 {
+			if forced || isZeroable(tag) || srcField.Float() != 0 {
 				dstField.SetFloat(srcField.Float())
 			}
 		case reflect.Bool:
-			if tag == "bool_or" {
+			switch {
+			case forced:
+				// 显式命中压过 bool_or：env 命中即覆盖，OR 会把显式 false
+				// 错误地留在 true 上（core#50）。
+				dstField.SetBool(srcField.Bool())
+			case tag == "bool_or":
 				dstField.SetBool(dstField.Bool() || srcField.Bool())
-			} else if isZeroable(tag) || srcField.Bool() {
+			case isZeroable(tag) || srcField.Bool():
 				dstField.SetBool(srcField.Bool())
 			}
 		case reflect.Slice:
-			if isZeroable(tag) || srcField.Len() > 0 {
+			if forced || isZeroable(tag) || srcField.Len() > 0 {
 				// 深拷贝(2026-09-06 复审修复):直接 Set 会让 dst 与 src
 				// 共享底层数组,合并后改 dst 元素会反向污染 src
 				dstField.Set(deepCopyValue(srcField))
 			}
 		case reflect.Map:
-			if isZeroable(tag) || srcField.Len() > 0 {
+			if forced || isZeroable(tag) || srcField.Len() > 0 {
 				// 深拷贝:map 是引用类型,共享后两侧写操作互相可见
 				dstField.Set(deepCopyValue(srcField))
 			}
 		case reflect.Struct:
 			// zeroable 对 struct 同样生效：零值 struct = 显式清空该配置块
-			// （此前被静默当成默认合并,运维无法通过远程配置整体清零）
+			// （此前被静默当成默认合并,运维无法通过远程配置整体清零）。
+			// 显式集合不含 struct 路径（ApplyEnv 只补记标量叶子）——继续下推。
 			switch {
 			case tag == "overwrite":
 				dstField.Set(srcField)
 			case tag == "zeroable" && srcField.IsZero():
 				dstField.SetZero()
 			default:
-				overlayFields(dstField, srcField)
+				overlayFields(dstField, srcField, fpath, explicit)
 			}
 		case reflect.Pointer:
 			// zeroable 的 nil 同样是有效值：远程配置缺块 = 显式清空
@@ -99,14 +131,14 @@ func overlayFields(dst, src reflect.Value) {
 				if dstField.IsNil() {
 					dstField.Set(reflect.New(srcField.Elem().Type()))
 				}
-				overlayFields(dstField.Elem(), srcField.Elem())
+				overlayFields(dstField.Elem(), srcField.Elem(), fpath, explicit)
 			} else {
 				// 深拷贝:非 struct 指针(*string/*int 等)与 overwrite 指针
 				// 原实现共享 pointee,改 dst 可见 src
 				dstField.Set(deepCopyValue(srcField))
 			}
 		default:
-			if isZeroable(tag) || !srcField.IsZero() {
+			if forced || isZeroable(tag) || !srcField.IsZero() {
 				dstField.Set(srcField)
 			}
 		}

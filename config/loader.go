@@ -130,7 +130,7 @@ func wrapByteError(err error) error {
 //
 // ⚠️ 该接线是「yaml 优先于 env」。12-factor（env 优先于配置文件）场景请勿直接
 // 复用此语义——在 yaml 填充后调用 ApplyEnvOverlay(dst)（见 overlay.go），
-// env 非零值会覆盖文件值。
+// env 命中即覆盖文件值（含显式零值 false/0）。
 func Unmarshal(data []byte, dst any, opts ...LoadOption) error {
 	if err := unmarshalInto(data, dst, newLoadOptions(opts)); err != nil {
 		return wrapByteError(err)
@@ -164,7 +164,7 @@ func LoadFile(path string, dst any, opts ...LoadOption) error {
 //
 // ⚠️ 该接线是「yaml 优先于 env」。12-factor（env 优先于配置文件）场景请勿直接
 // 复用 LoadBootstrap 的语义——在 yaml 填充后调用 ApplyEnvOverlay(dst)
-// （见 overlay.go），env 非零值会覆盖文件值。
+// （见 overlay.go），env 命中即覆盖文件值（含显式零值 false/0）。
 //
 // Lookup order:
 //  1. etc/config.yaml — used in Docker images (renamed from config-{env}.yaml at build time)
