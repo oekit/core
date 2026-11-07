@@ -1,3 +1,15 @@
+## [v0.13.1] — 2026-11-07
+
+- fix(network): IsPublicIP 重写——net.IP 标准判定 + IPv4 特殊用途段拒绝（CGNAT/TEST-NET/保留段）+ IPv6 全球单播正确放行，此前 IPv6 恒 false、组播/保留段恒 true（#53）
+- fix(network): ServerIP 内外网归类改用 IsPrivate——172.16/12 私网回归内网、字符串前缀死分支删除，IPv4/IPv6 同一条判定线（#54）
+- docs(config): parseInterval 括号口径修正——只接受 [/( 开头、]/) 结尾，删除「方向不敏感」的错误声明（#58）
+- fix(config): expandEnv 对 YAML 上下文危险值（换行/回车/注释序列）fail-closed 拒载——env 值静默损坏面关闭，错误带变量名不回显值（#59）
+- feat(config): WithLenientEnv 宽容档——不可解析 env 从拒载改为 WARN+跳过、default 可兜底，缺省仍 fail-closed（#51）
+- feat(config): ApplyEnvOverlay env 命中即覆盖（含零值）——显式 env 关布尔成为可能；OverlayMerge 本体语义不变，新增 OverlayMergeExplicit（#50）
+- fix(network): GetPodIP 回退 127.0.0.1 前打 ERROR（component=network.podip）——回环注册从静默 fail-open 转可观测，签名与返回值不变（oekit#141 core 侧）
+
+关联问题单：core#50、core#51、core#53、core#54、core#58、core#59。
+
 ## [v0.13.0] — 2026-11-07
 
 ### feat(config): `Snapshot[T]` 热更快照——原子发布 / Get 永不返 nil / 值与代次一致一对（[#49](https://github.com/oekit/core/issues/49)）
