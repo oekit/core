@@ -37,6 +37,26 @@ func TestIsPublicIP(t *testing.T) {
 		{"special 192.0.0/24", net.ParseIP("192.0.0.1"), false},
 		{"link local 169.254/16", net.ParseIP("169.254.1.1"), false},
 		{"unspecified", net.ParseIP("0.0.0.0"), false},
+		// ---- core#73：IANA IPv6 Special-Purpose 段全部拒绝（issue 表格 13 例） ----
+		{"ipv6 doc 2001:db8::/32", net.ParseIP("2001:db8::1"), false},
+		{"ipv6 doc 3fff::/20", net.ParseIP("3fff::1"), false},
+		{"ipv6 discard-only 100::/64", net.ParseIP("100::1"), false},
+		{"ipv6 dummy 100:0:0:1::/64", net.ParseIP("100:0:0:1::1"), false},
+		{"ipv6 benchmarking 2001:2::/48", net.ParseIP("2001:2::1"), false},
+		{"ipv6 srv6 5f00::/16", net.ParseIP("5f00::1"), false},
+		{"ipv6 orchid 2001:10::/28", net.ParseIP("2001:10::1"), false},
+		{"ipv6 orchidv2 2001:20::/28", net.ParseIP("2001:20::1"), false},
+		{"ipv6 teredo 2001::/32", net.ParseIP("2001::1"), false},
+		{"ipv6 6to4 2002::/16", net.ParseIP("2002::1"), false},
+		{"ipv6 nat64 well-known 64:ff9b::/96", net.ParseIP("64:ff9b::7f00:1"), false},
+		{"ipv6 nat64 local-use 64:ff9b:1::/48", net.ParseIP("64:ff9b:1::7f00:1"), false},
+		{"ipv4-compatible loopback ::127.0.0.1", net.ParseIP("::127.0.0.1"), false},
+		// 整段拒绝，非个别地址（issue 实测过的上下边界）
+		{"ipv6 doc 2001:db8::/32 lower edge", net.ParseIP("2001:db8::"), false},
+		{"ipv6 doc 2001:db8::/32 upper edge", net.ParseIP("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"), false},
+		{"ipv6 srv6 5f00::/16 upper edge", net.ParseIP("5f00:ffff::1"), false},
+		// 正常公网 IPv6 不受影响
+		{"ipv6 public 2606:4700::1111", net.ParseIP("2606:4700::1111"), true},
 		{"nil ip", nil, false},
 	}
 	for _, tt := range tests {
@@ -45,6 +65,24 @@ func TestIsPublicIP(t *testing.T) {
 				t.Errorf("IsPublicIP() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestIsPublicIPIPv4CompatibleLoopback 钉住 core#73 最硬的绕过路径：
+// ::127.0.0.1 是回环的 IPv4-compatible 写法，net.IP.To4() 对它返回 nil
+// （只认 ::ffff: 映射形式）、IsLoopback 抓不到，此前整个绕过判定被当公网放行。
+// 先断言前提（能解析、To4 确为 nil），再断言 IsPublicIP 拒绝——避免
+// ParseIP 失败导致的假绿。
+func TestIsPublicIPIPv4CompatibleLoopback(t *testing.T) {
+	ip := net.ParseIP("::127.0.0.1")
+	if ip == nil {
+		t.Fatal(`net.ParseIP("::127.0.0.1") = nil, 前提不成立`)
+	}
+	if v4 := ip.To4(); v4 != nil {
+		t.Fatalf("::127.0.0.1 To4() = %v, want nil", v4)
+	}
+	if IsPublicIP(ip) {
+		t.Error("IsPublicIP(::127.0.0.1) = true, want false")
 	}
 }
 

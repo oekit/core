@@ -8,6 +8,26 @@ import (
 	"strings"
 )
 
+// ipv6SpecialCIDRs 是 IANA「IPv6 Special-Purpose Address Registry」里的
+// 特殊用途段（core#73）：它们不是普通全球单播，不该被 IsPublicIP 当公网放行。
+// 口径对齐同生态 pkg/urlguard 的 blockedCIDRs——出站目标判定（urlguard）拒的段，
+// 「是否公网」判定（IsPublicIP）同样拒。清单固定在编译期，不在运行期增删。
+var ipv6SpecialCIDRs = []*net.IPNet{
+	{IP: net.ParseIP("::"), Mask: net.CIDRMask(96, 128)},          // IPv4-compatible ::/96（RFC 4291 已废止；::127.0.0.1 这类写法 To4() 返 nil，绕过回环门禁）
+	{IP: net.ParseIP("64:ff9b::"), Mask: net.CIDRMask(96, 128)},   // NAT64 well-known 64:ff9b::/96（RFC 6052；可内嵌 IPv4，含 127.0.0.1）
+	{IP: net.ParseIP("64:ff9b:1::"), Mask: net.CIDRMask(48, 128)}, // NAT64 local-use 64:ff9b:1::/48（RFC 8215）
+	{IP: net.ParseIP("100::"), Mask: net.CIDRMask(64, 128)},       // discard-only 100::/64（RFC 6666）
+	{IP: net.ParseIP("100:0:0:1::"), Mask: net.CIDRMask(64, 128)}, // dummy 100:0:0:1::/64（RFC 9780）
+	{IP: net.ParseIP("2001::"), Mask: net.CIDRMask(32, 128)},      // Teredo 2001::/32（RFC 4380）
+	{IP: net.ParseIP("2001:2::"), Mask: net.CIDRMask(48, 128)},    // benchmarking 2001:2::/48（RFC 5180）
+	{IP: net.ParseIP("2001:10::"), Mask: net.CIDRMask(28, 128)},   // ORCHID 2001:10::/28（已废止）
+	{IP: net.ParseIP("2001:20::"), Mask: net.CIDRMask(28, 128)},   // ORCHIDv2 2001:20::/28（RFC 7343）
+	{IP: net.ParseIP("2001:db8::"), Mask: net.CIDRMask(32, 128)},  // 文档段 2001:db8::/32（RFC 3849，IPv6 侧的 TEST-NET）
+	{IP: net.ParseIP("2002::"), Mask: net.CIDRMask(16, 128)},      // 6to4 2002::/16（RFC 3056；可内嵌任意 IPv4）
+	{IP: net.ParseIP("3fff::"), Mask: net.CIDRMask(20, 128)},      // 文档段 3fff::/20（RFC 9637）
+	{IP: net.ParseIP("5f00::"), Mask: net.CIDRMask(16, 128)},      // SRv6 SID 5f00::/16（RFC 9602）
+}
+
 // IsPublicIP 判断 IP 是否是公网（全球可路由单播）IP。
 //
 // 判定统一走 net.IP 的标准方法，不做字符串前缀匹配：
@@ -17,6 +37,12 @@ import (
 //   - IPv4 额外拒绝特殊用途段：CGNAT 100.64/10、192.0.0.0/24、基准测试段
 //     198.18/15、TEST-NET 192.0.2.0/24 / 198.51.100.0/24 / 203.0.113.0/24、
 //     保留段 240/4（含广播 255.255.255.255）；
+//   - IPv6 额外拒绝 IANA 特殊用途段（见 ipv6SpecialCIDRs）：文档段
+//     2001:db8::/32 与 3fff::/20、discard-only 100::/64、dummy
+//     100:0:0:1::/64、benchmarking 2001:2::/48、ORCHID 2001:10::/28 与
+//     2001:20::/28、Teredo 2001::/32、6to4 2002::/16、NAT64 64:ff9b::/96
+//     与 64:ff9b:1::/48、SRv6 5f00::/16、IPv4-compatible ::/96——此前
+//     To4() 对 IPv6 返 nil，整个 IPv6 绕过段判定直接放行（core#73）；
 //   - 其余 IPv4 与 **IPv6 全球单播地址**（如 2606:4700::1）返回 true——
 //     此前实现所有 IPv6 一律 false（core#53）。
 func IsPublicIP(ip net.IP) bool {
@@ -43,6 +69,15 @@ func IsPublicIP(ip net.IP) bool {
 			return false
 		case ip4[0]&0xF0 == 0xF0: // 保留段 240.0.0.0/4（含 255.255.255.255）
 			return false
+		}
+	} else {
+		// To4() == nil 的纯 IPv6：过 IANA 特殊用途段清单，命中即非公网。
+		// 注意 To4() 只认 ::ffff: 映射形式，::127.0.0.1 这类 IPv4-compatible
+		// 写法会走到这里，由 ::/96 段拦下。
+		for _, cidr := range ipv6SpecialCIDRs {
+			if cidr.Contains(ip) {
+				return false
+			}
 		}
 	}
 	return true
