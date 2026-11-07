@@ -91,9 +91,10 @@ func ApplyEnv(v any, opts ...PassOption) error {
 // 同时执行 require 与 env tag 卫生检查。
 //
 //   - range：仅数值字段（含 time.Duration，边界用 duration 文法如 "(0,30s]"）。
-//     文法：`[a,b]`/`(a,b)`/`[a,b)`/`(a,b]` 四种区间 + 单端开区间 `[a,)`/`(,b]`
-//     （开侧方括号方向不敏感），边界支持小数；tag 文法非法或值越界均报错，
-//     错误信息携带字段路径（嵌套用 `.` 连接，切片元素用 `Items[1].Qty`）。
+//     文法：`[a,b]`/`(a,b)`/`[a,b)`/`(a,b]` 四种区间 + 单端开区间 `[a,)`/`(,b]`，
+//     区间**必须以 `[` 或 `(` 开头、以 `]` 或 `)` 结尾**——`]a,b[` 这类反向括号
+//     写法不支持（缺省侧以空边界表达），边界支持小数；tag 文法非法或值越界
+//     均报错，错误信息携带字段路径（嵌套用 `.` 连接，切片元素用 `Items[1].Qty`）。
 //   - options：仅 string 字段的枚举校验；当前值（含空串）必须命中枚举之一，
 //     可选枚举字段请配合 default tag 给默认值。
 //   - require：字段必须由 yaml / env 显式提供（default 不算）。带 FieldSet 时
@@ -683,7 +684,9 @@ func validateRangeField(fv reflect.Value, rng, path string) error {
 }
 
 // parseInterval 解析 range 文法 `[a,b]`/`(a,b)`/`[a,b)`/`(a,b]`/`[a,)`/`(,b]`，
-// 返回上下界（nil 表示开侧无界）与两侧是否闭区间。开侧的方括号方向不敏感。
+// 返回上下界（nil 表示该侧无界）与两侧是否闭区间。
+// 区间必须以 `[` 或 `(` 开头、以 `]` 或 `)` 结尾——`]a,b[` 这类反向括号写法
+// 不支持（开侧用空边界表达，如 `[a,)`），报 "must start with '[' or '('"。
 func parseInterval(rng string, parseBound func(string) (float64, error)) (low, high *float64, lowInc, highInc bool, err error) {
 	s := strings.TrimSpace(rng)
 	if len(s) < 2 {

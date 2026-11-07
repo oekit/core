@@ -232,7 +232,9 @@ func TestValidateTags_RangeMatrix(t *testing.T) {
 }
 
 func TestValidateTags_RangeMalformedTags(t *testing.T) {
-	for _, tag := range []string{"abc", "[1,2,3]", "[5,1]", "[,]", "[0,100"} {
+	// "]0,100[" / "0,100]" 钉住文档口径：区间必须以 [/( 开头、]/) 结尾，
+	// 反向括号写法不支持（core#58，doc 与实现二选一后取「改文档」）。
+	for _, tag := range []string{"abc", "[1,2,3]", "[5,1]", "[,]", "[0,100", "]0,100[", "0,100]"} {
 		// 动态构造带非法 tag 的结构体（编译期 tag 无法循环注入）。
 		typ := reflect.StructOf([]reflect.StructField{{
 			Name: "V",
