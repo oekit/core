@@ -1,5 +1,9 @@
 
 
+## [v0.13.3] — 2026-11-08
+
+- chore: 补齐本版版本节——上一个已发布 tag（）的 CHANGELOG 快照缺本版段（tag 快照不可变），本版补上并带出新的地板v0.13.2
+
 ## [v0.13.2] — 2026-11-08
 
 - fix(network): IsPublicIP 拒绝 IANA IPv6 特殊用途段——To4() 为 nil 不再整族放行（#73）：IPv4 侧特殊段逐一拒绝，但 ip.To4() 对 IPv6 返回 nil，整个 IPv6 绕过段判定直接 return true（文档段 2001:db8::/32、discard-only 100::/64、benchmarking 2001:2::/48、ORCHID 2001:10::/28、Teredo 2001::/32、6to4 2002::/16、NAT64 64:ff9b::/96、SRv6 5f00::/16 等全部被当公网放行——::127.0.0.1 写法绕过回环门禁）；修法：To4() 为 nil 分支用一张 package-level []*net.IPNet 固定清单逐段 Contains 判定，命中即 false，IPv4 侧逻辑不动
