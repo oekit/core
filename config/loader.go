@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 )
 
 // envPattern matches ${VAR} or ${VAR:default} placeholders.
@@ -14,11 +15,25 @@ var envPattern = regexp.MustCompile(`\$\{([^}:]+)(?::([^}]*))?\}`)
 // environment variable values. If VAR is unset and a default is provided,
 // the default value is used. Unset VAR without default preserves the placeholder
 // as-is (i.e. the literal "${VAR}" string becomes the config value).
-func expandEnv(data []byte) []byte {
-	return envPattern.ReplaceAllFunc(data, func(match []byte) []byte {
+//
+// 替换发生在 YAML 解码**之前**，无法感知占位符所在的标量上下文，因此对会让
+// 值**静默损坏**的替换值 fail-closed 报错（不回显值本身——这类值多半是密钥）：
+// 换行/回车（双引号标量折叠为空格）、前导 `#`（整个值变注释）与 ` #`
+// （后半截被当注释截断）。含 `"` 的值在双引号标量里会破坏配对导致解析失败，
+// 本就 fail-closed，不在拦截清单内。多行证书/含注释符的 token 这类值请经
+// ApplyEnvOverlay（结构体级注入，无文本上下文问题）传入（core#59）。
+func expandEnv(data []byte) ([]byte, error) {
+	var expandErr error
+	out := envPattern.ReplaceAllFunc(data, func(match []byte) []byte {
 		groups := envPattern.FindSubmatch(match)
 		key := string(groups[1])
 		if val, ok := os.LookupEnv(key); ok {
+			if snippet, reason := yamlCorruptingSequence(val); snippet != "" {
+				if expandErr == nil {
+					expandErr = fmt.Errorf("expand ${%s}: env value contains %s — %s; refusing to load a silently corrupted config value, inject it via ApplyEnvOverlay instead", key, snippet, reason)
+				}
+				return match // 报错即中止加载，占位符保留与否不影响结果
+			}
 			return []byte(val)
 		}
 		// groups[2] is nil when ":default" part is absent → preserve placeholder
@@ -27,6 +42,23 @@ func expandEnv(data []byte) []byte {
 		}
 		return groups[2]
 	})
+	return out, expandErr
+}
+
+// yamlCorruptingSequence 找出替换值里会被 YAML 静默重释的字符序列：
+// 返回 (特征描述, 后果说明)；干净值返回 ("", "")。判定集与 expandEnv 的
+// 拦截清单一致——只拦「解析成功但值已损坏」的静默失败面（core#59）。
+func yamlCorruptingSequence(val string) (snippet, reason string) {
+	if strings.ContainsAny(val, "\n\r") {
+		return "a line break", "YAML folds line breaks to spaces inside quoted scalars"
+	}
+	if strings.HasPrefix(val, "#") {
+		return "a leading '#'", "YAML parses the entire value as a comment leaving the field empty"
+	}
+	if strings.Contains(val, " #") {
+		return "' #'", "YAML treats everything after ' #' as a comment and truncates the value"
+	}
+	return "", ""
 }
 
 // parseErr / tagErr：区分两类失败，使各入口能给出**与历史一致**的错误文案。
@@ -48,7 +80,10 @@ func (e *tagErr) Unwrap() error { return e.err }
 // Unmarshal / LoadFile / LoadBootstrap 三个入口全部走它——严格模式、tag 语义、
 // 错误类型只有一份实现，不会出现「某个入口漏了严格判定」这类不一致。
 func unmarshalInto(data []byte, dst any, o loadOptions) error {
-	expanded := expandEnv(data)
+	expanded, err := expandEnv(data)
+	if err != nil {
+		return err
+	}
 	if err := unmarshalConfig(expanded, dst, o); err != nil {
 		return &parseErr{err: err}
 	}
