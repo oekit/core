@@ -7,24 +7,44 @@ import (
 	"strings"
 )
 
-// IsPublicIP 判断 IP 是否是公网 IP。
+// IsPublicIP 判断 IP 是否是公网（全球可路由单播）IP。
+//
+// 判定统一走 net.IP 的标准方法，不做字符串前缀匹配：
+//   - 两族通用拒绝：loopback、link-local、组播（IsMulticast 覆盖 IPv4 224/4
+//     与 IPv6 ff00::/8，含链路本地组播）、未指定地址、私网（IsPrivate：10/8、
+//     172.16/12、192.168/16 及 IPv6 ULA fc00::/7）；
+//   - IPv4 额外拒绝特殊用途段：CGNAT 100.64/10、192.0.0.0/24、基准测试段
+//     198.18/15、TEST-NET 192.0.2.0/24 / 198.51.100.0/24 / 203.0.113.0/24、
+//     保留段 240/4（含广播 255.255.255.255）；
+//   - 其余 IPv4 与 **IPv6 全球单播地址**（如 2606:4700::1）返回 true——
+//     此前实现所有 IPv6 一律 false（core#53）。
 func IsPublicIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() ||
+		ip.IsUnspecified() || ip.IsPrivate() {
 		return false
 	}
 	if ip4 := ip.To4(); ip4 != nil {
 		switch {
-		case ip4[0] == 10:
+		case ip4[0] == 100 && ip4[1]&0xC0 == 64: // CGNAT 100.64.0.0/10
 			return false
-		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0: // 192.0.0.0/24
 			return false
-		case ip4[0] == 192 && ip4[1] == 168:
+		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 2: // TEST-NET-1 192.0.2.0/24
 			return false
-		default:
-			return true
+		case ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19): // 基准测试段 198.18.0.0/15
+			return false
+		case ip4[0] == 198 && ip4[1] == 51 && ip4[2] == 100: // TEST-NET-2 198.51.100.0/24
+			return false
+		case ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113: // TEST-NET-3 203.0.113.0/24
+			return false
+		case ip4[0]&0xF0 == 0xF0: // 保留段 240.0.0.0/4（含 255.255.255.255）
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // IsIPv4 判断是否是 IPv4 地址。
@@ -78,22 +98,44 @@ func ServerIPString() string {
 }
 
 // ServerIP 返回服务器的外网 IP 和内网 IP。
+//
+// 内外网判定不再做字符串前缀匹配——旧实现把 172.16/12 私网判成外网
+// （纯内网部署下注册中心拿到的地址是错的），又把全部 192.x.x.x 判成内网
+// （TEST-NET 等公网段遭殃），`127.` 分支更是 loopback 过滤后的死代码
+// （core#54）。现统一走 net.IP 标准方法（见 classifyServerIP），
+// IPv4 与 IPv6 同一条判定线。
 func ServerIP() (externalIP, internalIP string) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "", ""
 	}
 
+	ips := make([]net.IP, 0, len(addrs))
 	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				ipaddr := ipnet.IP.String()
-				if strings.HasPrefix(ipaddr, "10.") || strings.HasPrefix(ipaddr, "192.") || strings.HasPrefix(ipaddr, "127.") {
-					internalIP = ipaddr
-				} else {
-					externalIP = ipaddr
-				}
-			}
+		if ipnet, ok := address.(*net.IPNet); ok {
+			ips = append(ips, ipnet.IP)
+		}
+	}
+	return classifyServerIP(ips)
+}
+
+// classifyServerIP 对一组接口 IP 做内外网归类，返回 (外网 IP, 内网 IP)；
+// 同侧多个地址时后见者胜（与历史行为一致）。它是 ServerIP 的纯函数核心，
+// 便于脱离真实网卡测试。
+//
+// 内网 = net.IP.IsPrivate（10/8、172.16/12、192.168/16 及 IPv6 ULA fc00::/7）；
+// 其余可路由单播 = 外网。loopback、link-local、组播与未指定地址不参与归类：
+// 它们既不该被上报为外网，也不该算内网。
+func classifyServerIP(ips []net.IP) (externalIP, internalIP string) {
+	for _, ip := range ips {
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			ip.IsMulticast() || ip.IsUnspecified() {
+			continue
+		}
+		if ip.IsPrivate() {
+			internalIP = ip.String()
+		} else {
+			externalIP = ip.String()
 		}
 	}
 	return externalIP, internalIP
