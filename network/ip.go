@@ -2,6 +2,7 @@ package network
 
 import (
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -172,11 +173,25 @@ func GetLocalIP() (string, error) {
 
 // GetPodIP 返回本机 IP 地址（无 error 版本，适合无法处理 error 的注册场景）。
 // 优先读取 POD_IP 环境变量，其次遍历网卡；失败时回退到 127.0.0.1。
+// 回退**不再是静默的**（oekit#141）：ERROR 级日志可观测——回环地址对其他
+// 节点不可拨号，以它注册出去的实例永远无法被拨通；注册侧防线（如
+// registry.ParseAddr）已按 fail-closed 拒绝回环地址，这里的 ERROR 是
+// 「注册为什么被拒」的第一现场（IPv6-only 环境、POD_IP 未注入、多网卡
+// 取不到 IPv4 都会走到这里）。
 // 这是 GetLocalIP 的便捷封装，uidgen、nacos、registry 应委托至此。
 func GetPodIP() string {
 	ip, err := GetLocalIP()
 	if err != nil {
-		return "127.0.0.1"
+		return podIPFallback(err)
 	}
 	return ip
+}
+
+// podIPFallback 是 GetPodIP 的回退路径（独立成函数便于测试）：打 ERROR 后
+// 返回回环地址。返回值保持历史行为不变——调用方若拿它去注册，会被注册侧
+// 的回环拒绝（registry#64）拦下；本函数的价值是让「为什么」可见。
+func podIPFallback(err error) string {
+	slog.Error("network: GetLocalIP 失败，GetPodIP 回退 127.0.0.1——回环地址不可被其他节点拨号，注册侧应拒绝（oekit#141）",
+		"component", "network.podip", "error", err)
+	return "127.0.0.1"
 }
