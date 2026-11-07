@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"regexp"
@@ -69,7 +70,8 @@ func FillDefaults(v any, opts ...PassOption) error {
 // 写入会补记进 FieldSet，避免后续 FillDefaults 用 default 冲掉 env 值。
 //
 // env 设为空串（或纯空白）视同未设置；env 值无法按字段类型解析时 fail-closed
-// 报错（错误信息携带字段路径与变量名）。支持类型与遍历范围同 FillDefaults。
+// 报错（错误信息携带字段路径与变量名）——可传 WithLenientEnv 转为 WARN + 跳过
+// （见 fieldset.go）。支持类型与遍历范围同 FillDefaults。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
 func ApplyEnv(v any, opts ...PassOption) error {
@@ -79,7 +81,7 @@ func ApplyEnv(v any, opts ...PassOption) error {
 	}
 	cfg := buildPassConfig(opts)
 	apply := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
-		return applyEnvField(sf, fv, path, yamlPath, addr, cfg.set, cfg.envNaming)
+		return applyEnvField(sf, fv, path, yamlPath, addr, cfg.set, cfg.envNaming, cfg.lenientEnv)
 	}
 	if err := walkTaggedStruct(rv, "", "", true, true, apply); err != nil {
 		return fmt.Errorf("config: ApplyEnv: %w", err)
@@ -346,12 +348,13 @@ func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string, set
 
 // applyEnvField 是 ApplyEnv 的单字段处理：env 已设置（非空）且字段为零值时，
 // 按字段类型解析环境变量值并写入。FieldSet 命中的路径（yaml 显式提供）不覆盖；
-// 成功写入后补记进 FieldSet。
+// 成功写入后补记进 FieldSet。lenient 开启时解析失败 WARN + 跳过（不补记，
+// core#51 宽容档），缺省 fail-closed。
 //
 // env 名按 EnvNaming 的顺序解析（覆盖表 → env tag → 路径派生名，见 envnaming.go）：
 // 覆盖表命中即用表里的绝对名；否则用 env tag（有前缀则加前缀）；都没有且设了
 // 前缀时按 yaml 键路径派生名。
-func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool, set FieldSet, n EnvNaming) error {
+func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool, set FieldSet, n EnvNaming, lenient bool) error {
 	binding := resolveEnvName(sf, yamlPath, addr, n)
 	if binding.name == "" {
 		return nil
@@ -371,6 +374,14 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath stri
 		return nil // yaml 显式值优先
 	}
 	if err := setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", binding.name, raw), path); err != nil {
+		if lenient {
+			// 宽容档：跳过而非拒载——字段保持零值（default 可兜底）、
+			// FieldSet 不补记（不算「已提供」）。
+			slog.Default().With("component", "config.env").Warn(
+				"skip unparsable env value (lenient mode)",
+				"field", path, "env", binding.name, "err", err.Error())
+			return nil
+		}
 		return err
 	}
 	if set != nil {

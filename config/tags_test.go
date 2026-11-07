@@ -180,6 +180,68 @@ func TestApplyEnv_InvalidValueFailsClosed(t *testing.T) {
 	}
 }
 
+// ---- WithLenientEnv（core#51 宽容档） ----
+
+// TestApplyEnv_LenientSkipsUnparsableValue 钉住 core#51：SERVER_PORT=abc 这类
+// env 笔误不再阻断启动——WARN + 跳过（字段保持零值、FieldSet 不补记），
+// 后续 FillDefaults 可用 default 兜底（Spring `${ENV:default}` 式契约）。
+func TestApplyEnv_LenientSkipsUnparsableValue(t *testing.T) {
+	t.Setenv("TAGS_TEST_PORT", "abc")
+	cfg := struct {
+		Port int `yaml:"port" env:"TAGS_TEST_PORT" default:"8080"`
+	}{}
+	set := FieldSet{}
+	if err := ApplyEnv(&cfg, WithLenientEnv(), WithFieldSet(set)); err != nil {
+		t.Fatalf("lenient mode should skip instead of failing, got %v", err)
+	}
+	if cfg.Port != 0 {
+		t.Errorf("skipped field must stay zero, got %d", cfg.Port)
+	}
+	if set.Has("Port") {
+		t.Error("lenient skip must not mark the field as provided in FieldSet")
+	}
+	// 跳过 ≠ 提供零值：default 仍应兜底。
+	if err := FillDefaults(&cfg, WithFieldSet(set)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 8080 {
+		t.Errorf("default should fill after lenient skip, got %d", cfg.Port)
+	}
+}
+
+// TestApplyEnv_LenientStillAppliesParsableValues 宽容档只放宽「解析失败」，
+// 可解析的 env 值照常写入并补记 FieldSet。
+func TestApplyEnv_LenientStillAppliesParsableValues(t *testing.T) {
+	t.Setenv("TAGS_TEST_PORT", "7000")
+	cfg := struct {
+		Port int `yaml:"port" env:"TAGS_TEST_PORT"`
+	}{}
+	set := FieldSet{}
+	if err := ApplyEnv(&cfg, WithLenientEnv(), WithFieldSet(set)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 7000 {
+		t.Errorf("parsable env must still apply, got %d", cfg.Port)
+	}
+	if !set.Has("Port") {
+		t.Error("successful env write must be recorded in FieldSet")
+	}
+}
+
+// TestApplyEnv_LenientDoesNotAffectDefaults 宽容档仅作用于 env 值解析：
+// default tag 解析失败仍是硬错误（文件/代码面变更走评审，保持 fail-closed）。
+func TestApplyEnv_LenientDoesNotAffectDefaults(t *testing.T) {
+	cfg := struct {
+		N int `default:"abc"`
+	}{}
+	if err := ApplyEnv(&cfg, WithLenientEnv()); err != nil {
+		t.Fatal(err) // 无 env 字段，ApplyEnv 本身不报错
+	}
+	if err := FillDefaults(&cfg, WithLenientEnv()); err == nil {
+		t.Error("malformed default tag must stay fail-closed regardless of lenient env")
+	}
+}
+
 // ---- ValidateTags: range ----
 
 func TestValidateTags_RangeMatrix(t *testing.T) {

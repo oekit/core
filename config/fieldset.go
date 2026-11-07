@@ -33,6 +33,7 @@ type passConfig struct {
 	set           FieldSet
 	envNamingLint bool
 	envNaming     EnvNaming
+	lenientEnv    bool
 }
 
 // WithFieldSet 传入显式提供集合：命中的路径视为「已有调用方值」——
@@ -47,6 +48,24 @@ func WithFieldSet(s FieldSet) PassOption {
 // `ignorederived:"true"` 豁免。默认关闭——命名不一致并不一定是错误。
 func WithEnvNamingLint() PassOption {
 	return func(c *passConfig) { c.envNamingLint = true }
+}
+
+// WithLenientEnv 开启 ApplyEnv 的**宽容档**：env 值无法按字段类型解析时不再
+// 报错拒载，而是记一条 WARN（stdlib slog，component=config.env）并跳过该字段
+// ——字段保持零值（后续 FillDefaults 可用 default 兜底），FieldSet **不补记**
+// （后续 pass 不会把它当「已提供」）。缺省行为保持 fail-closed 不变（core#51）。
+//
+// 为什么需要宽容档：「配置文件写错值 = 启动失败」合理（文件面小、变更走评审），
+// 但「环境变量写错 = 启动失败」过严——env 面大（容器编排 / 临时 export /
+// debug 残留），一个无关变量的笔误不应阻断整个服务。这近似 Spring
+// `${ENV:default}` 系 loader「解析失败静默忽略、落 default」的既有契约，
+// 供从此类 loader 迁移到本包的宿主选用。仅作用于 **env 值解析**：
+// default tag 解析失败、range/options 校验失败等仍是硬错误。
+//
+// 可与 WithFieldSet / WithEnvNaming 叠加；ApplyEnvOverlay 透传本选项——
+// 被跳过的字段不进 env 命中集合，也就不会用零值清掉 dst 的文件值。
+func WithLenientEnv() PassOption {
+	return func(c *passConfig) { c.lenientEnv = true }
 }
 
 func buildPassConfig(opts []PassOption) *passConfig {
