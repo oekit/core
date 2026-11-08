@@ -26,6 +26,7 @@ var ipv6SpecialCIDRs = []*net.IPNet{
 	{IP: net.ParseIP("2002::"), Mask: net.CIDRMask(16, 128)},      // 6to4 2002::/16（RFC 3056；可内嵌任意 IPv4）
 	{IP: net.ParseIP("3fff::"), Mask: net.CIDRMask(20, 128)},      // 文档段 3fff::/20（RFC 9637）
 	{IP: net.ParseIP("5f00::"), Mask: net.CIDRMask(16, 128)},      // SRv6 SID 5f00::/16（RFC 9602）
+	{IP: net.ParseIP("fec0::"), Mask: net.CIDRMask(10, 128)},      // site-local fec0::/10（RFC 3879 已废止，存量内网仍在用；IsPrivate 只覆盖 fc00::/7、IsLinkLocalUnicast 只覆盖 fe80::/10，都拦不到它）
 }
 
 // IsPublicIP 判断 IP 是否是公网（全球可路由单播）IP。
@@ -34,15 +35,18 @@ var ipv6SpecialCIDRs = []*net.IPNet{
 //   - 两族通用拒绝：loopback、link-local、组播（IsMulticast 覆盖 IPv4 224/4
 //     与 IPv6 ff00::/8，含链路本地组播）、未指定地址、私网（IsPrivate：10/8、
 //     172.16/12、192.168/16 及 IPv6 ULA fc00::/7）；
-//   - IPv4 额外拒绝特殊用途段：CGNAT 100.64/10、192.0.0.0/24、基准测试段
-//     198.18/15、TEST-NET 192.0.2.0/24 / 198.51.100.0/24 / 203.0.113.0/24、
-//     保留段 240/4（含广播 255.255.255.255）；
+//   - IPv4 额外拒绝特殊用途段：0.0.0.0/8（RFC 1122 "this network"，
+//     core#98——IsUnspecified 只覆盖 0.0.0.0 单个地址）、CGNAT 100.64/10、
+//     192.0.0.0/24、基准测试段 198.18/15、TEST-NET 192.0.2.0/24 /
+//     198.51.100.0/24 / 203.0.113.0/24、保留段 240/4（含广播
+//     255.255.255.255）；
 //   - IPv6 额外拒绝 IANA 特殊用途段（见 ipv6SpecialCIDRs）：文档段
 //     2001:db8::/32 与 3fff::/20、discard-only 100::/64、dummy
 //     100:0:0:1::/64、benchmarking 2001:2::/48、ORCHID 2001:10::/28 与
 //     2001:20::/28、Teredo 2001::/32、6to4 2002::/16、NAT64 64:ff9b::/96
-//     与 64:ff9b:1::/48、SRv6 5f00::/16、IPv4-compatible ::/96——此前
-//     To4() 对 IPv6 返 nil，整个 IPv6 绕过段判定直接放行（core#73）；
+//     与 64:ff9b:1::/48、SRv6 5f00::/16、site-local fec0::/10（RFC 3879
+//     已废止，core#98）、IPv4-compatible ::/96——此前 To4() 对 IPv6 返
+//     nil，整个 IPv6 绕过段判定直接放行（core#73）；
 //   - 其余 IPv4 与 **IPv6 全球单播地址**（如 2606:4700::1）返回 true——
 //     此前实现所有 IPv6 一律 false（core#53）。
 func IsPublicIP(ip net.IP) bool {
@@ -55,6 +59,8 @@ func IsPublicIP(ip net.IP) bool {
 	}
 	if ip4 := ip.To4(); ip4 != nil {
 		switch {
+		case ip4[0] == 0: // "this network" 0.0.0.0/8（RFC 1122；IsUnspecified 只覆盖 0.0.0.0 本身，0.1.2.3 这类同段非零地址要靠这里拦，core#98）
+			return false
 		case ip4[0] == 100 && ip4[1]&0xC0 == 64: // CGNAT 100.64.0.0/10
 			return false
 		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0: // 192.0.0.0/24
