@@ -190,9 +190,20 @@ func GetServerIP() string {
 // 优先读取 POD_IP 环境变量（K8s 注入），其次遍历网卡获取第一个非回环 IPv4。
 // 未找到时返回错误。这是 ekit 中获取本机 IP 的唯一实现，
 // uidgen、nacos、registry 等包应委托至此，避免逻辑重复。
+//
+// POD_IP 经 net.ParseIP 校验且必须是 IPv4（本函数契约是「非回环 IPv4」）：
+// 注入串写错（not-an-ip、带端口的 1.2.3.4:8080、IPv6）不再原样返回
+// （core#87 此前 err=nil 且错误地址直达注册面，与同文件其余路径的
+// fail-closed 口径相反）——非法值打 WARN 后忽略，回退网卡探测。
 func GetLocalIP() (string, error) {
 	if ip := os.Getenv("POD_IP"); ip != "" {
-		return ip, nil
+		if p := net.ParseIP(ip); p != nil && p.To4() != nil {
+			return ip, nil
+		}
+		// 非法/非 IPv4：不中断（拿不到 IP 的代价是注册不可达，回退探测
+		// 仍有救），但必须可观测——静默忽略等于把「注入错了」藏起来。
+		slog.Warn("network: POD_IP 不是合法 IPv4，忽略并回退网卡探测",
+			"component", "network.podip", "pod_ip", ip)
 	}
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {

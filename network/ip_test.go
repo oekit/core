@@ -68,6 +68,64 @@ func TestIsPublicIP(t *testing.T) {
 	}
 }
 
+// TestIsPublicIPIssue77Samples 钉住 core#77 报告的样本地址清单。#77 是
+// core#73（PR #74，v0.13.2）的重报单：它列的地址全部落在 #74 已补的
+// IANA IPv6 特殊用途段清单内，本测试逐个复跑收口——全部拒绝即证据。
+func TestIsPublicIPIssue77Samples(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   net.IP
+		want bool
+	}{
+		// NAT64 well-known 前缀内嵌回环/私网（issue 表格第 1、2 行）
+		{"nat64 embedded loopback 64:ff9b::7f00:1", net.ParseIP("64:ff9b::7f00:1"), false},
+		{"nat64 embedded private 64:ff9b::a00:1", net.ParseIP("64:ff9b::a00:1"), false},
+		// 6to4 内嵌回环（issue 表格第 3 行）
+		{"6to4 embedded loopback 2002:7f00:1::1", net.ParseIP("2002:7f00:1::1"), false},
+		// 文档段与 discard-only（issue 表格第 4、5 行）
+		{"doc 2001:db8::1", net.ParseIP("2001:db8::1"), false},
+		{"discard-only 100::1", net.ParseIP("100::1"), false},
+		// 真·全球单播放行不受影响（issue 表格第 6 行）
+		{"global unicast 2606:4700::1", net.ParseIP("2606:4700::1"), true},
+		// 回环与 IPv4-mapped 回环（issue 表格第 7、8 行）
+		{"loopback 127.0.0.1", net.ParseIP("127.0.0.1"), false},
+		{"ipv4-mapped loopback ::ffff:127.0.0.1", net.ParseIP("::ffff:127.0.0.1"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPublicIP(tt.ip); got != tt.want {
+				t.Errorf("IsPublicIP(%v) = %v, want %v", tt.ip, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGetLocalIPPODIPValidation 钉住 core#87：POD_IP 非法值不再原样返回。
+// 合法 IPv4 透传；not-an-ip / 带端口 / IPv6 一律忽略并回退网卡探测。
+func TestGetLocalIPPODIPValidation(t *testing.T) {
+	// 合法 IPv4：原样透传
+	t.Setenv("POD_IP", "10.1.2.3")
+	ip, err := GetLocalIP()
+	if err != nil || ip != "10.1.2.3" {
+		t.Errorf("GetLocalIP() = %q, %v; want 10.1.2.3, nil", ip, err)
+	}
+
+	// 非法形态：忽略并回退——绝不能把注入串带出去
+	for _, bad := range []string{"not-an-ip", "1.2.3.4:8080", "fd00::1", "999.1.2.3", " "} {
+		t.Run("bad:"+bad, func(t *testing.T) {
+			t.Setenv("POD_IP", bad)
+			ip, err := GetLocalIP()
+			if err == nil && ip == bad {
+				t.Errorf("GetLocalIP() 原样返回了非法 POD_IP %q（err=nil）", ip)
+			}
+			// 回退路径：要么拿到网卡 IPv4，要么报「找不到」的错——两者都不是注入串
+			if err == nil && ip == "" {
+				t.Error("GetLocalIP() = empty string with nil error")
+			}
+		})
+	}
+}
+
 // TestIsPublicIPIPv4CompatibleLoopback 钉住 core#73 最硬的绕过路径：
 // ::127.0.0.1 是回环的 IPv4-compatible 写法，net.IP.To4() 对它返回 nil
 // （只认 ::ffff: 映射形式）、IsLoopback 抓不到，此前整个绕过判定被当公网放行。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 )
 
@@ -108,8 +109,21 @@ func deepMergeMaps(a, b map[string]any) map[string]any {
 // 可传 WithEnvNaming 启用 env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
 // 注意：本函数内部自带 FieldSet 记录 env 命中路径，传入 WithFieldSet 会被
 // 覆盖（overlay 侧没有 yaml 显式值需要保护）。
+//
+// 切片元素字段同样支持（core#85）：此前 overlay 是空结构体，切片全 nil，
+// ApplyEnv 无法到达元素字段（walkTaggedStruct 遍历 0 个元素），元素上的
+// env tag / 覆盖表条目静默失效——与 ApplyEnv（yaml 优先路径下元素存在、
+// env 生效）行为相反。现按 dst 的切片长度给 overlay 构造**零值**元素
+// （不拷 dst 值：env 命中即覆盖的语义要求 env 值不因 dst 已有值而缺席），
+// 合并侧对带元素级命中路径的切片逐元素下推——dst 非 env 命中的元素字段
+// 保持 yaml 值，命中的字段取 env 值。
 func ApplyEnvOverlay[T any](dst *T, opts ...PassOption) error {
+	if dst == nil {
+		return nil
+	}
 	var overlay T
+	var grown []grownSliceRef
+	growOverlaySlices(reflect.ValueOf(&overlay).Elem(), reflect.ValueOf(dst).Elem(), "", &grown)
 	set := FieldSet{}
 	overlayOpts := make([]PassOption, 0, len(opts)+1)
 	overlayOpts = append(overlayOpts, opts...)
@@ -117,6 +131,67 @@ func ApplyEnvOverlay[T any](dst *T, opts ...PassOption) error {
 	if err := ApplyEnv(&overlay, overlayOpts...); err != nil {
 		return err
 	}
+	// 没有任何 env 落点的构造元素回缩为 nil：构造只服务于「env 能不能到达
+	// 元素字段」，env 未命中时零值元素若留在 overlay 里，会触发合并侧的
+	// 整体替换把 dst 清零——回缩后该切片回到旧判定（nil ⇒ 不覆盖 dst）。
+	for _, g := range grown {
+		if !hasElementExplicit(set, g.path) {
+			g.val.Set(reflect.Zero(g.val.Type()))
+		}
+	}
 	OverlayMergeExplicit(dst, &overlay, set)
 	return nil
+}
+
+// grownSliceRef 记录一个被构造出来的 overlay 切片：path 是 Go 字段路径
+// （与 FieldSet 键同口径，前缀匹配元素级命中用），val 是切片字段本身
+// （overlay 为局部变量，字段值地址稳定，ApplyEnv 不会移动它）。
+type grownSliceRef struct {
+	path string
+	val  reflect.Value
+}
+
+// growOverlaySlices 把 dst 中 []struct / []*struct 切片的长度同步到 overlay
+// （同类型两棵结构体树同步下降）：元素为**零值**（[]struct）或指向零值的
+// 新指针（[]*struct），让 ApplyEnv 的元素遍历有落点。嵌套 struct / *struct
+// 继续下探；map 不遍历（与 tag pass 口径一致）。构造过的切片记入 grown
+// （路径 + 字段值），供 ApplyEnv 之后按「有没有元素级 env 命中」决定回缩。
+func growOverlaySlices(overlay, dst reflect.Value, path string, grown *[]grownSliceRef) {
+	if overlay.Kind() != reflect.Struct || dst.Kind() != reflect.Struct {
+		return
+	}
+	t := overlay.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if !t.Field(i).IsExported() {
+			continue
+		}
+		of, df := overlay.Field(i), dst.Field(i)
+		fpath := t.Field(i).Name
+		if path != "" {
+			fpath = path + "." + fpath
+		}
+		switch of.Kind() {
+		case reflect.Slice:
+			elem := of.Type().Elem()
+			isStruct := elem.Kind() == reflect.Struct
+			isStructPtr := elem.Kind() == reflect.Pointer && elem.Elem().Kind() == reflect.Struct
+			if df.Len() == 0 || of.Len() > 0 || (!isStruct && !isStructPtr) {
+				continue
+			}
+			g := reflect.MakeSlice(of.Type(), df.Len(), df.Len())
+			if isStructPtr {
+				for j := 0; j < df.Len(); j++ {
+					g.Index(j).Set(reflect.New(elem.Elem())) // 指向零值，元素字段可被 env 命中
+				}
+			}
+			of.Set(g)
+			*grown = append(*grown, grownSliceRef{path: fpath, val: of})
+		case reflect.Struct:
+			growOverlaySlices(of, df, fpath, grown)
+		case reflect.Pointer:
+			if of.Type().Elem().Kind() == reflect.Struct && !of.IsNil() && !df.IsNil() {
+				growOverlaySlices(of.Elem(), df.Elem(), fpath, grown)
+			}
+		}
+	}
 }

@@ -109,10 +109,14 @@ type fieldInfo struct {
 
 // yamlFields 收集结构体在 YAML 映射层级的合法键。
 // 语义与 yaml.v3 对齐：yaml tag 优先（`yaml:"name"`），无 tag 时用小写字段名；
-// `,inline` 的内嵌结构体字段**拍平到本层**；匿���内嵌结构体（无 yaml tag）同样
-// 按 inline 处理；`yaml:"-"` 跳过；未导出字段跳过。
-func yamlFields(t reflect.Type, prefix []int) map[string]fieldInfo {
-	out := map[string]fieldInfo{}
+// `,inline` 的内嵌结构体字段**拍平到本层**；内嵌但无 yaml tag 的字段**不**拍平
+// （yaml.v3 把它当普通字段，键名是类型名的小写）；`,inline` 的 map 字段吸收
+// 任意键——其元素类型经第二个返回值交给调用方（core#82：此前 inline map 不
+// 登记任何键，它吸收的键被本层判成未知键直接拒载，合法配置起不来）；
+// `yaml:"-"` 跳过；未导出字段跳过（匿名的未导出内嵌类型除外，见函数体内
+// 与 yaml.v3 对齐的说明）。
+func yamlFields(t reflect.Type, prefix []int) (fields map[string]fieldInfo, inlineMap reflect.Type) {
+	fields = map[string]fieldInfo{}
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
 		// yaml.v3 的规则是「跳过**私有且非匿名字段**」——匿名的未导出类型
@@ -141,25 +145,36 @@ func yamlFields(t reflect.Type, prefix []int) map[string]fieldInfo {
 		// 只有**显式** `,inline` 才拍平。yaml.v3 对「内嵌但无 yaml tag」的字段
 		// 并**不**拍平——它被当作普通字段，键名是类型名的小写（实测确认）。
 		if inline {
-			if ft.Kind() == reflect.Struct {
-				for k, v := range yamlFields(ft, idx) {
-					if _, dup := out[k]; !dup {
-						out[k] = v
+			switch {
+			case ft.Kind() == reflect.Struct:
+				sub, _ := yamlFields(ft, idx)
+				for k, v := range sub {
+					if _, dup := fields[k]; !dup {
+						fields[k] = v
 					}
 				}
-				continue
+				// 注意：内嵌结构体**内部的** inline map 不上抛豁免——实测
+				// yaml.v3 只在直接解码的这层结构体上兑现 inline map，嵌套
+				// inline 里的 map 吸收的键会被**静默丢弃**（解码不落任何
+				// 字段）。严格模式把它们判成未知键是对的：那正是要拦的
+				// 「配置写了但哪儿都没去」。
+			case ft.Kind() == reflect.Map:
+				// inline map：任意键都合法（core#82）——本层不再有未知键；
+				// 元素类型交给调用方对键值继续下降校验。
+				if inlineMap == nil {
+					inlineMap = ft
+				}
 			}
-			// inline map：任意键都合法，交给调用方按 map 处理
 			continue
 		}
 		if name == "" {
 			name = strings.ToLower(sf.Name)
 		}
-		if _, dup := out[name]; !dup {
-			out[name] = fieldInfo{index: idx}
+		if _, dup := fields[name]; !dup {
+			fields[name] = fieldInfo{index: idx}
 		}
 	}
-	return out
+	return fields, inlineMap
 }
 
 // checkUnknownKeys 解析 YAML 并沿结构体类型下降，找出第一个未知键。
@@ -229,7 +244,7 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 	}
 	switch t.Kind() {
 	case reflect.Struct:
-		fields := yamlFields(t, nil)
+		fields, inlineMap := yamlFields(t, nil)
 		legal := make([]string, 0, len(fields))
 		for k := range fields {
 			legal = append(legal, k)
@@ -253,6 +268,16 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 			}
 			info, ok := fields[key.Value]
 			if !ok {
+				// `,inline` 的 map 字段吸收本层任意键（core#82）：键合法不报
+				// 未知——否则合法 YAML 被直接拒载（代码注释「任意键都合法」
+				// 与实现正好相反的那口锅）。值按 map 元素类型继续下降校验：
+				// 元素是结构体时其内部未知键照样逃不过严格模式。
+				if inlineMap != nil {
+					if err := walkStrict(val, inlineMap.Elem(), joinPath(path, key.Value)); err != nil {
+						return err
+					}
+					continue
+				}
 				return &UnknownKeyError{
 					Path:  joinPath(path, key.Value),
 					Key:   key.Value,

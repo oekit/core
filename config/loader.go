@@ -1,11 +1,16 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // envPattern matches ${VAR} or ${VAR:default} placeholders.
@@ -18,10 +23,12 @@ var envPattern = regexp.MustCompile(`\$\{([^}:]+)(?::([^}]*))?\}`)
 //
 // 替换发生在 YAML 解码**之前**，无法感知占位符所在的标量上下文，因此对会让
 // 值**静默损坏**的替换值 fail-closed 报错（不回显值本身——这类值多半是密钥）：
-// 换行/回车（双引号标量折叠为空格）、前导 `#`（整个值变注释）与 ` #`
-// （后半截被当注释截断）。含 `"` 的值在双引号标量里会破坏配对导致解析失败，
-// 本就 fail-closed，不在拦截清单内。多行证书/含注释符的 token 这类值请经
-// ApplyEnvOverlay（结构体级注入，无文本上下文问题）传入（core#59）。
+// 换行/回车（双引号标量折叠为空格）、前导 `#`（整个值变注释）、` #`
+// （后半截被当注释截断）与反斜杠（core#83：双引号标量里 `\n`/`\t`/`\\` 被
+// 重新解释，值被静默改写）。含 `"` 的值在双引号标量里会破坏配对导致解析
+// 失败，本就 fail-closed——且该解析错误现经 wrapEnvParseError 点名 env 变量
+// （core#83 第二点）。多行证书/含注释符的 token 这类值请经 ApplyEnvOverlay
+// （结构体级注入，无文本上下文问题）传入（core#59）。
 func expandEnv(data []byte) ([]byte, error) {
 	var expandErr error
 	out := envPattern.ReplaceAllFunc(data, func(match []byte) []byte {
@@ -47,7 +54,8 @@ func expandEnv(data []byte) ([]byte, error) {
 
 // yamlCorruptingSequence 找出替换值里会被 YAML 静默重释的字符序列：
 // 返回 (特征描述, 后果说明)；干净值返回 ("", "")。判定集与 expandEnv 的
-// 拦截清单一致——只拦「解析成功但值已损坏」的静默失败面（core#59）。
+// 拦截清单一致——只拦「解析成功但值已损坏」的静默失败面（core#59；
+// 反斜杠转义是 core#83 补的残留面）。
 func yamlCorruptingSequence(val string) (snippet, reason string) {
 	if strings.ContainsAny(val, "\n\r") {
 		return "a line break", "YAML folds line breaks to spaces inside quoted scalars"
@@ -57,6 +65,13 @@ func yamlCorruptingSequence(val string) (snippet, reason string) {
 	}
 	if strings.Contains(val, " #") {
 		return "' #'", "YAML treats everything after ' #' as a comment and truncates the value"
+	}
+	if strings.Contains(val, "\\") {
+		// 反斜杠（core#83）：替换是解码前的纯文本替换，落进**双引号标量**
+		// 后 YAML 继续解释转义——`\n` 变真换行、`\t` 变制表符、`\\` 变 `\`，
+		// 值被静默改写且无报错（Windows 路径 C:\temp、正则、密钥常含 `\`）。
+		// 无法感知标量上下文 ⇒ 含反斜杠一律 fail-closed。
+		return "a backslash", "YAML re-interprets backslash escapes inside double-quoted scalars (\\n becomes a real line break) silently rewriting the value"
 	}
 	return "", ""
 }
@@ -85,10 +100,50 @@ func unmarshalInto(data []byte, dst any, o loadOptions) error {
 		return err
 	}
 	if err := unmarshalConfig(expanded, dst, o); err != nil {
+		if wrapped := wrapEnvParseError(data, expanded, err); wrapped != nil {
+			return &parseErr{err: wrapped}
+		}
 		return &parseErr{err: err}
 	}
 	if err := applyTagPasses(dst, expanded, o.envNaming); err != nil {
 		return &tagErr{err: err}
+	}
+	return nil
+}
+
+// wrapEnvParseError 在「替换前语法合法、替换后解析失败」时把 yaml 错误包装上
+// env 变量名（core#83）：裸的 `yaml: found unknown escape character` 指不到是
+// 哪个变量注入的坏值，排查现场与配置现场对不上。判定三步：
+//  1. 原文与展开结果一致 ⇒ 本次没有发生替换，错误与 env 无关；
+//  2. 严格模式的 UnknownKeyError 是键面错误，与替换无关；
+//  3. 原文本身解析失败 ⇒ 错误在文件里，env 不是元凶。
+//
+// 三者皆否 ⇒ 展开破坏了语法，报错点名**被替换的变量**（不回显值——注入值
+// 多半是密钥），并提示改走 ApplyEnvOverlay。
+func wrapEnvParseError(original, expanded []byte, err error) error {
+	if bytes.Equal(original, expanded) {
+		return nil
+	}
+	var uke *UnknownKeyError
+	if errors.As(err, &uke) {
+		return nil
+	}
+	// 原文语法探测（非 nil 返回 = 不包装）：原文本身解析合法才可能是 env
+	// 注入值破坏语法；原文解析失败说明错误在文件里，env 不是元凶。
+	var probe yaml.Node
+	if yaml.Unmarshal(original, &probe) == nil {
+		var keys []string
+		for _, m := range envPattern.FindAllSubmatch(original, -1) {
+			name := string(m[1])
+			if _, ok := os.LookupEnv(name); ok && !slices.Contains(keys, name) {
+				keys = append(keys, fmt.Sprintf("${%s}", name))
+			}
+		}
+		if len(keys) > 0 {
+			sort.Strings(keys)
+			return fmt.Errorf("yaml became unparseable after expanding env placeholders (%s): %w — an injected env value likely broke its scalar context; inject it via ApplyEnvOverlay instead",
+				strings.Join(keys, ", "), err)
+		}
 	}
 	return nil
 }

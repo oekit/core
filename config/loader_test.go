@@ -163,3 +163,60 @@ func TestLoadFile_ExpandEnvFailClosedCarriesPath(t *testing.T) {
 		t.Errorf("error should carry file path and env var name, got %v", err)
 	}
 }
+
+// TestExpandEnvBackslashIntercepted 回归 core#83：反斜杠此前不在损坏拦截清单
+// 里——双引号标量里的 env 值 `\n` 被 YAML 重新解释成真换行，值被静默改写
+// （"a\nb" len4 变 len3）；Windows 路径 C:\temp 触发 unknown escape 的报错也
+// 不带变量名。现含反斜杠一律 fail-closed，报错带变量名。
+func TestExpandEnvBackslashIntercepted(t *testing.T) {
+	type cfg struct {
+		Secret string `yaml:"secret"`
+	}
+	t.Setenv("TOKEN_X", `a\nb`)
+	var c cfg
+	err := Unmarshal([]byte(`secret: "${TOKEN_X}"`), &c)
+	if err == nil {
+		t.Fatalf("env value with backslash must fail closed, got decoded=%q", c.Secret)
+	}
+	if !strings.Contains(err.Error(), "TOKEN_X") {
+		t.Errorf("error must name the variable, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "backslash") {
+		t.Errorf("error must mention backslash, got: %v", err)
+	}
+	// 静默改写面收口：绝不能把被重释后的值写进字段
+	if c.Secret != "" {
+		t.Errorf("silently rewritten value leaked into field: %q", c.Secret)
+	}
+
+	// Windows 路径形态同样拦截（曾报 unknown escape 且不带变量名）
+	t.Setenv("WIN_PATH", `C:\temp\data`)
+	var c2 cfg
+	err = Unmarshal([]byte(`secret: "${WIN_PATH}"`), &c2)
+	if err == nil || !strings.Contains(err.Error(), "WIN_PATH") {
+		t.Errorf("windows-style path must fail closed naming WIN_PATH, got: %v", err)
+	}
+}
+
+// TestEnvParseErrorNamesVariable 回归 core#83 第二点：env 注入的值破坏 YAML
+// 语法（如双引号标量里的 `"` 破坏配对）时，解析错误必须点名变量——裸的
+// yaml 语法错误指不到现场。
+func TestEnvParseErrorNamesVariable(t *testing.T) {
+	type cfg struct {
+		Secret string `yaml:"secret"`
+	}
+	t.Setenv("TOKEN_Y", `abc"def`) // 注入引号破坏双引号标量配对
+	var c cfg
+	err := Unmarshal([]byte(`secret: "${TOKEN_Y}"`), &c)
+	if err == nil {
+		t.Fatal("quote-bearing env value must break the double-quoted scalar")
+	}
+	if !strings.Contains(err.Error(), "TOKEN_Y") {
+		t.Errorf("parse error must name the env variable, got: %v", err)
+	}
+	// 对照：没发生替换时错误保持原样，不掺 env 提示
+	err2 := Unmarshal([]byte(`secret: "abc"def"`), &c)
+	if err2 == nil || strings.Contains(err2.Error(), "env placeholder") {
+		t.Errorf("error without expansion must stay raw, got: %v", err2)
+	}
+}
