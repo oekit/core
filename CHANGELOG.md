@@ -1,5 +1,11 @@
 
 
+## [v0.13.5] — 2026-11-09
+
+- fix(network): IsPublicIP 补 0.0.0.0/8 与 fec0::/10 特殊用途段判定（#98）
+
+关联问题单：core#98。
+
 ## [v0.13.4] — 2026-11-08
 
 - fix(governance): 「路径前缀」策略生效——service 按「.」段前缀最长匹配（com.example 命中 com.example.svc）、path 按「/」段前缀最长匹配（/order 命中 /order/123，method 限定键 GET:/order 优先于裸 /order），LookupLimiterKey 返回**实际命中的配置键**而非恒为全局 ""（#78）：此前 lookup 只做两档精确匹配，前缀档整个缺失——按路径前缀配置的限流/超时对高基数路径静默失效，限流桶仍按原始 path 分片（正是 LookupLimiterKey 注释要避免的桶表无界增长）；段边界是硬约束（/orders 不被 /order 命中、com.examplex 不被 com.example 命中）
