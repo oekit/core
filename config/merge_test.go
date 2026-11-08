@@ -355,3 +355,61 @@ func TestOverlayMergeExplicit_NilSetMatchesOverlayMerge(t *testing.T) {
 		t.Errorf("nil set must behave like OverlayMerge, got %+v", *dst)
 	}
 }
+
+// TestOverwriteStructDeepCopy 回归 core#84 与 core#90（同族重报）：merge:"overwrite"
+// 的结构体分支此前整体 Set——Go 值语义对引用型字段是**浅**拷贝，dst 与 src
+// 共享底层 map/slice，改 dst 反向污染 src；deepCopyValue 缺 reflect.Struct
+// 分支，指针分支（overwrite 指针解引用）同样共享。两处一起钉住。
+func TestOverwriteStructDeepCopy(t *testing.T) {
+	type sub struct {
+		Tags []string          `merge:"overwrite"`
+		M    map[string]string `merge:"overwrite"`
+	}
+	type outer struct {
+		Sub    *sub `merge:"overwrite"`
+		SubPtr *sub `merge:"overwrite"`
+	}
+	src := &outer{
+		Sub:    &sub{Tags: []string{"a"}, M: map[string]string{"k": "v"}},
+		SubPtr: &sub{Tags: []string{"b"}, M: map[string]string{"j": "w"}},
+	}
+	dst := &outer{}
+	OverlayMerge(dst, src)
+
+	// 改 dst 的值类型字段：不得泄漏到 src
+	dst.Sub.Tags[0] = "MUT"
+	dst.Sub.M["k"] = "MUT"
+	if src.Sub.Tags[0] != "a" || src.Sub.M["k"] != "v" {
+		t.Errorf("dst mutation leaked into src.Sub: src.Sub=%+v", src.Sub)
+	}
+	// 指针分支：overwrite 指针解引用同样不得共享
+	dst.SubPtr.Tags[0] = "MUT"
+	dst.SubPtr.M["j"] = "MUT"
+	if src.SubPtr.Tags[0] != "b" || src.SubPtr.M["j"] != "w" {
+		t.Errorf("dst mutation leaked into src.SubPtr: src.SubPtr=%+v", src.SubPtr)
+	}
+	// 反向亦然：改 src 不得泄漏到 dst
+	src.Sub.M["new"] = "from-src"
+	if _, ok := dst.Sub.M["new"]; ok {
+		t.Error("src mutation leaked into dst.Sub")
+	}
+	// 覆盖语义不变：dst 拿到的是 src 的值
+	if dst.Sub.Tags[0] != "MUT" || dst.Sub.M["k"] != "MUT" {
+		t.Errorf("overwrite semantics broken: dst.Sub=%+v", dst.Sub)
+	}
+
+	// 数组元素是 struct（内含 map）时整体赋值同样共享——数组分支钉住
+	type cell struct {
+		M map[string]string
+	}
+	type withArray struct {
+		Cells [2]cell `merge:"overwrite"`
+	}
+	srcA := &withArray{Cells: [2]cell{{M: map[string]string{"x": "1"}}, {}}}
+	dstA := &withArray{}
+	OverlayMerge(dstA, srcA)
+	dstA.Cells[0].M["x"] = "MUT"
+	if srcA.Cells[0].M["x"] != "1" {
+		t.Errorf("array-of-struct aliasing: src.Cells=%+v", srcA.Cells)
+	}
+}

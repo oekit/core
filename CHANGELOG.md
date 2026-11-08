@@ -1,8 +1,26 @@
 
 
+## [v0.13.4] — 2026-11-08
+
+- fix(governance): 「路径前缀」策略生效——service 按「.」段前缀最长匹配（com.example 命中 com.example.svc）、path 按「/」段前缀最长匹配（/order 命中 /order/123，method 限定键 GET:/order 优先于裸 /order），LookupLimiterKey 返回**实际命中的配置键**而非恒为全局 ""（#78）：此前 lookup 只做两档精确匹配，前缀档整个缺失——按路径前缀配置的限流/超时对高基数路径静默失效，限流桶仍按原始 path 分片（正是 LookupLimiterKey 注释要避免的桶表无界增长）；段边界是硬约束（/orders 不被 /order 命中、com.examplex 不被 com.example 命中）
+- fix(governance): Store 值与版本改为**单原子单元**发布——atomic.Pointer[cell{val,gen}] + CAS 推进代次，新增 LoadVersion 一次返回一致的一对（#79）：此前 val/version 是两个原子变量且「先换值、后进版本」，并发读侧在交错窗口拿到「新值配旧版本」的自相矛盾对（实测 20 万次 Update 观察到 345 次），按 Version()==last 判变化的消费方漏判、派生状态停留旧配置——与 config.Snapshot 同构范式
+- fix(governance): Store.Update/NewStore 入参**入库前深拷贝**——发布方 Update 后复用/改写自己的 cfg 不再波及已发布快照（#80）：此前只存指针，快照被发布方静默改写而版本不前进（消费方按版本判「没变化」永久用旧派生状态），并发下还构成 map 读写数据竞争；「不可变快照」承诺对发布方与消费方同时成立
+- fix(config): ConfigWatcher 并发 Reload 按**读取代号裁决**——迟到结果丢弃，「最新读到的配置」最终胜出（#81）：dispatchMu 此前只护 Swap+回调，Read/parse 在锁外——先发起的重载若解析慢，会在后发起的重载（已 Swap 新值）之后完成 Swap，把旧配置盖回新配置之上（热更后配置回退）；代号取在 Read 返回时刻（谁读到的源内容更新谁赢），非发起时刻
+- fix(config): 严格模式放行 `yaml:",inline"` map 吸收的任意键（#82）：此前 inline map 字段不登记任何键，它吸收的键被上层结构体判成「未知配置键」直接拒载——合法 YAML 起不来（非严格模式正常）；inline map 的元素类型继续下降校验（元素是结构体时内部未知键照样拒载）；嵌套 inline（struct 内 struct 内 map）不上抛豁免——实测 yaml.v3 只在直接解码层兑现 inline map，嵌套层的键会被静默丢弃，严格模式判未知键正是拦「配置写了但哪儿都没去」
+- fix(config): expandEnv 损坏拦截清单补**反斜杠**（#83）——双引号标量里 env 值的 `\n`/`\t`/`\\` 被 YAML 重新解释、值被静默改写（Windows 路径/正则/密钥常含 `\`），现 fail-closed 且错误带变量名；yaml 解析错误发生在 env 替换值上时（如注入 `"` 破坏双引号配对）用变量名包装报错（`wrapEnvParseError`：原文与展开一致/原文本身语法坏/严格模式键面错误除外），排查现场与配置现场对得上
+- fix(config): OverlayMerge 的 merge:"overwrite" 结构体分支**深拷贝**（#84，同族英文重报单 #90 一并收口）：整体 Set 是 Go 值语义的浅拷贝，struct 里的 map/slice 字段仍与 src 共享引用——改 dst 反向污染 src；deepCopyValue 补 reflect.Struct 分支（先整块值拷贝保未导出字段、可 Set 的字段逐一递归替换）与 reflect.Array 分支（数组元素是 struct 时整体赋值同样共享），merge.go 数组字段分支同步深拷贝
+- fix(config): ApplyEnvOverlay 支持**切片元素字段**的 env（#85）：overlay 此前是空结构体、切片全 nil，ApplyEnv 遍历 0 个元素——元素上的 env tag 与覆盖表条目（items.limit，yaml 键路径不编号）静默失效，与 ApplyEnv（yaml 优先路径元素存在、env 生效）行为相反；现按 dst 切片长度给 overlay 构造零值元素（[]struct/[]*struct），合并侧对带元素级命中路径的切片逐元素下推——env 命中字段覆盖 dst（含非零值）、未命中字段保持 dst 值；无命中时构造元素回缩为 nil，不触发整体替换清零
+- fix(lifecycle): New(0)/Add(...,0)/负数 timeout 定义为**显式无超时**——closer 的 ctx 不带 deadline（#86）：此前 0 被直接喂给 context.WithTimeout 立即到期，每个 closer 拿到的都是已取消的 context，资源实际未关却对外打「shutdown completed」；文档对齐（New/Add 注释），SetDrainTimeout 的「负数不限时」口径同一
+- fix(network): GetLocalIP 对 POD_IP 做 net.ParseIP 校验且要求 IPv4（#87）：注入串写错（not-an-ip、带端口、IPv6）此前原样返回且 err=nil——错误地址直达注册面，与同文件其余路径 fail-closed 口径相反；现非法值打 WARN（component=network.podip）后忽略、回退网卡探测
+- fix(config): env 值首尾空白**字符串字段保留原值**（#88）：判定「是否未设置」用裁剪值（纯空白视同未设置），写入字符串字段用原始值——口令/token 两端空格是合法内容，此前被静默裁剪且与 ${VAR} 文本替换路径（本就不裁剪）给出不同结果；非字符串类型解析前仍裁剪（数值/布尔/duration 文法不容空白）
+- docs(config): strict.go yamlFields 注释重写——原注释含 U+FFFD 乱码（匿名内嵌写成乱码三连）且宣称「匿名内嵌结构体同样按 inline 处理」与实现（yaml.v3 不拍平无 tag 内嵌）正好相反（#89）；全仓扫描 U+FFFD 无其余命中
+- docs(changelog): v0.13.3 段首条文案勘误——tag 名补全（v0.13.2）、「新的地板」误写为上一版号更正（core 无内部依赖，无依赖地板变更）（#94）；GitHub Release 正文同步订正
+
+关联问题单：core#77（验证收口——#77 是 #73/v0.13.2 的重报单：其全部样本地址（64:ff9b::7f00:1、64:ff9b::a00:1、2002:7f00:1::1、2001:db8::1、100::1 等）在 main 上复跑全部被拒，PR #74 已补的 IANA IPv6 特殊用途段清单覆盖无遗漏，本版补回归测试钉住样本清单，不重复修）、core#78、core#79、core#80、core#81、core#82、core#83、core#84、core#85、core#86、core#87、core#88、core#89、core#90、core#94。
+
 ## [v0.13.3] — 2026-11-08
 
-- chore: 补齐本版版本节——上一个已发布 tag（）的 CHANGELOG 快照缺本版段（tag 快照不可变），本版补上并带出新的地板v0.13.2
+- chore: 补齐本版版本节——上一个已发布 tag（v0.13.2）的 CHANGELOG 快照缺本版段（tag 快照不可变），本版段于 v0.13.3 发布后补记（core 无内部依赖，无依赖地板变更；勘误 core#94：原句 tag 名缺失、「新的地板」误写为上一版号）
 
 ## [v0.13.2] — 2026-11-08
 

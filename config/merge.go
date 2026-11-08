@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 )
 
 // OverlayMerge 将 src 中非零值字段覆盖合并到 dst 中，支持嵌套结构体。
@@ -91,6 +93,13 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 				dstField.SetBool(srcField.Bool())
 			}
 		case reflect.Slice:
+			// 元素级显式路径（core#85，ApplyEnvOverlay 的 Items[0].Limit 形态）
+			// 存在时**不做**整体替换——整块换会把 dst 元素里非 env 命中的字段
+			// 清成零值；逐元素下推合并，dst 只有 env 命中的字段取 src 值。
+			if hasElementExplicit(explicit, fpath) {
+				mergeSliceElements(dstField, srcField, fpath, explicit)
+				continue
+			}
 			if forced || isZeroable(tag) || srcField.Len() > 0 {
 				// 深拷贝(2026-09-06 复审修复):直接 Set 会让 dst 与 src
 				// 共享底层数组,合并后改 dst 元素会反向污染 src
@@ -101,13 +110,22 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 				// 深拷贝:map 是引用类型,共享后两侧写操作互相可见
 				dstField.Set(deepCopyValue(srcField))
 			}
+		case reflect.Array:
+			if forced || isZeroable(tag) || !srcField.IsZero() {
+				// 深拷贝（core#84 同族）:数组整体 Set 是值拷贝,但元素是
+				// struct/引用类型时底层 map/slice 仍共享
+				dstField.Set(deepCopyValue(srcField))
+			}
 		case reflect.Struct:
 			// zeroable 对 struct 同样生效：零值 struct = 显式清空该配置块
 			// （此前被静默当成默认合并,运维无法通过远程配置整体清零）。
 			// 显式集合不含 struct 路径（ApplyEnv 只补记标量叶子）——继续下推。
 			switch {
 			case tag == "overwrite":
-				dstField.Set(srcField)
+				// 深拷贝（core#84/#90）：整体 Set 是 Go 值语义的**浅**拷贝，
+				// struct 里的 map/slice 字段仍是共享引用——合并后改 dst 会
+				// 反向污染 src（与本文件 slice/map 分支已修掉的别名问题同族）。
+				dstField.Set(deepCopyValue(srcField))
 			case tag == "zeroable" && srcField.IsZero():
 				dstField.SetZero()
 			default:
@@ -145,9 +163,60 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 	}
 }
 
-// deepCopyValue 递归拷贝容器类型(map/slice/pointer/interface 内动态值),
-// 值类型(字符串/数字/bool/struct/数组)按 Go 值语义直接拷贝。
-// 仅用于 OverlayMerge 的合并路径(config 合并是低频操作,开销可忽略)。
+// hasElementExplicit 报告 explicit 里是否有落在 fpath 元素层级的路径
+// （`Items[0].Limit` 形态，前缀 fpath+"["）。只有 ApplyEnvOverlay 的元素级
+// env 命中会产生这类路径——命中才走逐元素合并，否则整体替换语义不变。
+func hasElementExplicit(explicit FieldSet, fpath string) bool {
+	if explicit == nil {
+		return false
+	}
+	prefix := fpath + "["
+	for k := range explicit {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeSliceElements 逐元素下推合并：[]struct 元素按 struct 合并（非命中
+// 字段保持 dst 值，命中字段取 src 值），[]*struct 元素两两解引用合并、dst
+// 元素为 nil 时深拷贝 src 元素补位。dst 比 src 长时多余元素原样保留；
+// src 更长时多余元素深拷贝追加（外部直接调 OverlayMergeExplicit 的防御路径
+// ——ApplyEnvOverlay 两侧长度相等）。路径带下标（Items[0].Limit），与
+// ApplyEnv 补记进 FieldSet 的键同口径。
+func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit FieldSet) {
+	elem := dstField.Type().Elem()
+	for j := 0; j < srcField.Len(); j++ {
+		epath := fmt.Sprintf("%s[%d]", fpath, j)
+		se := srcField.Index(j)
+		if j >= dstField.Len() {
+			v := deepCopyValue(se)
+			dstField.Set(reflect.Append(dstField, v))
+			continue
+		}
+		de := dstField.Index(j)
+		switch {
+		case elem.Kind() == reflect.Struct:
+			overlayFields(de, se, epath, explicit)
+		case elem.Kind() == reflect.Pointer && elem.Elem().Kind() == reflect.Struct:
+			if se.IsNil() {
+				continue
+			}
+			if de.IsNil() {
+				de.Set(deepCopyValue(se))
+				continue
+			}
+			overlayFields(de.Elem(), se.Elem(), epath, explicit)
+		}
+	}
+}
+
+// deepCopyValue 递归拷贝容器类型(map/slice/pointer/interface 内动态值/struct/
+// 数组)。struct 不能走 Go 值语义直接拷贝——那对引用型字段是**浅**拷贝
+// （core#84：overwrite 指针解引用后仍与 src 共享底层 map/slice），须逐字段
+// 递归；数组同理（元素是 struct 时整体赋值仍共享）。仅用于 OverlayMerge 的
+// 合并路径(config 合并是低频操作,开销可忽略)。
 func deepCopyValue(v reflect.Value) reflect.Value {
 	if !v.IsValid() {
 		return v
@@ -170,6 +239,26 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
 		for i := 0; i < v.Len(); i++ {
 			out.Index(i).Set(deepCopyValue(v.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(deepCopyValue(v.Index(i)))
+		}
+		return out
+	case reflect.Struct:
+		// 先整块值拷贝（保住未导出字段——reflect 无法 Set 它们），再把
+		// 可 Set 的引用型字段逐一替换成深拷贝；标量字段递归返回原值，
+		// 等价不动。
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		for i := 0; i < out.NumField(); i++ {
+			f := out.Field(i)
+			if !f.CanSet() {
+				continue
+			}
+			f.Set(deepCopyValue(v.Field(i)))
 		}
 		return out
 	case reflect.Pointer:

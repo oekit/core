@@ -67,7 +67,10 @@ type job struct {
 	timeout time.Duration
 }
 
-// New 创建一个关闭管理器。defaultTimeout 是默认的单个资源关闭超时。
+// New 创建一个关闭管理器。defaultTimeout 是默认的单个资源关闭超时；
+// **0 表示关闭任务不设超时**（显式无超时，core#86）——此前 New(0) 会让
+// context.WithTimeout(ctx, 0) 立即到期，所有用默认超时的关闭任务拿到
+// 已取消的 context，资源实际未关却对外打「shutdown completed」。
 // 可选 WithLogger 注入宿主日志；不传则使用 stdlib slog。
 func New(defaultTimeout time.Duration, opts ...ManagerOption) *Manager {
 	m := &Manager{
@@ -112,7 +115,11 @@ func (m *Manager) IsAccepting() bool {
 }
 
 // Add 注册一个需要在关闭时清理的资源。
-// timeout 传 0 使用 Manager 的默认超时。
+// timeout 传 0 使用 Manager 的默认超时；默认超时也为 0（New(0)）或 timeout
+// 为负时，任务**不设超时**——closer 拿到的 context 不会带 deadline，跑多久
+// 都等它返回（core#86：0 曾被直接喂给 context.WithTimeout，立即到期，资源
+// 未关却对外报「shutdown completed」）。0/负数 = 显式无超时，与
+// SetDrainTimeout 的「负数不限时」口径对齐。
 func (m *Manager) Add(name string, closer func(ctx context.Context) error, timeout time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -277,8 +284,13 @@ func (m *Manager) runCloser(j job, parent context.Context) (err error) {
 		}
 	}()
 
-	// 独立预算：从 Background 派生，前序任务的耗时不会挤占本任务的超时
-	jobCtx, cancel := context.WithTimeout(context.Background(), j.timeout)
+	// 独立预算：从 Background 派生，前序任务的耗时不会挤占本任务的超时。
+	// timeout <= 0 = 显式无超时（core#86）：WithTimeout(ctx, 0) 会立即到期，
+	// 每个 closer 拿到的都是已取消的 context——资源未关却对外报 completed。
+	jobCtx, cancel := context.WithCancel(context.Background())
+	if j.timeout > 0 {
+		jobCtx, cancel = context.WithTimeout(context.Background(), j.timeout)
+	}
 	defer cancel()
 	// 调用方 ctx 已取消/超时：同步取消本任务，保证 closer 立即观察到取消状态
 	if err := parent.Err(); err != nil {

@@ -71,7 +71,10 @@ func FillDefaults(v any, opts ...PassOption) error {
 //
 // env 设为空串（或纯空白）视同未设置；env 值无法按字段类型解析时 fail-closed
 // 报错（错误信息携带字段路径与变量名）——可传 WithLenientEnv 转为 WARN + 跳过
-// （见 fieldset.go）。支持类型与遍历范围同 FillDefaults。
+// （见 fieldset.go）。**字符串字段写入原始 env 值**（core#88）：首尾空白是
+// 口令/token 的合法内容，不做裁剪——与 ${VAR} 文本替换路径同值；非字符串
+// 类型解析前仍裁剪（数值/布尔/duration 文法不容空白）。支持类型与遍历范围
+// 同 FillDefaults。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
 func ApplyEnv(v any, opts ...PassOption) error {
@@ -366,12 +369,22 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath stri
 	if !ok {
 		return nil
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil // 显式设为空串视同未设置
+	if strings.TrimSpace(raw) == "" {
+		return nil // 判定用裁剪值：显式设为空串/纯空白视同未设置
 	}
 	if !isZeroValue(fv) {
 		return nil // yaml 显式值优先
+	}
+	// 写入用**原始值**（core#88）：字符串字段保留首尾空白——口令/token/
+	// 签名串两端空格可能是合法内容，静默裁剪会让认证失败现场与配置现场
+	// 对不上；${VAR} 文本替换路径本就不裁剪，两条路径须同值。非字符串类型
+	// 解析前仍裁剪（数值/布尔/duration 文法不容空白，裁剪是解析容错）。
+	if fv.Kind() == reflect.String {
+		fv.SetString(raw)
+		if set != nil {
+			set[path] = true
+		}
+		return nil
 	}
 	if err := setScalarFromString(fv, raw, fmt.Sprintf("env %s=%q", binding.name, raw), path); err != nil {
 		if lenient {

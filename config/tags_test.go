@@ -549,3 +549,62 @@ func TestLoadBootstrap_NonStructSkipsTagPasses(t *testing.T) {
 		t.Errorf("expected a=1, got %v", cfg)
 	}
 }
+
+// TestApplyEnvPreservesWhitespace 回归 core#88：字符串字段此前被静默裁剪
+// （"  pa ss  " → "pa ss"）——口令/token 两端空格是合法内容，裁剪让认证
+// 失败现场与配置现场不一致；${VAR} 文本替换路径不裁剪，两条路径对同一
+// env 值给出不同结果。现在字符串字段写入原始值，判定「是否未设置」仍用
+// 裁剪值；非字符串类型解析前裁剪。
+func TestApplyEnvPreservesWhitespace(t *testing.T) {
+	type cfg struct {
+		Token string        `yaml:"token" env:"WS_TOKEN"`
+		Port  int           `yaml:"port" env:"WS_PORT"`
+		Dur   time.Duration `yaml:"dur" env:"WS_DUR"`
+		Tags  []string      `yaml:"tags" env:"WS_TAGS"`
+	}
+	var c cfg
+	t.Setenv("WS_TOKEN", "  pa ss  ")
+	t.Setenv("WS_PORT", " 8080 ")
+	t.Setenv("WS_DUR", " 5s ")
+	t.Setenv("WS_TAGS", " a , b ")
+	if err := ApplyEnv(&c); err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
+	if c.Token != "  pa ss  " {
+		t.Errorf("string field whitespace was stripped: %q, want %q", c.Token, "  pa ss  ")
+	}
+	if c.Port != 8080 {
+		t.Errorf("int field must parse trimmed value: %d, want 8080", c.Port)
+	}
+	if c.Dur != 5*time.Second {
+		t.Errorf("duration field must parse trimmed value: %v, want 5s", c.Dur)
+	}
+	if len(c.Tags) != 2 || c.Tags[0] != "a" || c.Tags[1] != "b" {
+		t.Errorf("[]string field: %v, want [a b]", c.Tags)
+	}
+
+	// 纯空白仍视同未设置（判定口径不变）
+	var c2 cfg
+	t.Setenv("WS_TOKEN", "   ")
+	if err := ApplyEnv(&c2); err != nil {
+		t.Fatalf("ApplyEnv blank: %v", err)
+	}
+	if c2.Token != "" {
+		t.Errorf("blank env must be treated as unset, got %q", c2.Token)
+	}
+
+	// 与 ${VAR} 文本替换路径同值：同一 env 值两条路径结果一致
+	t.Setenv("WS_TOKEN", "  pa ss  ")
+	var viaText struct {
+		Token string `yaml:"token"`
+	}
+	if err := Unmarshal([]byte(`token: "${WS_TOKEN}"`), &viaText); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if viaText.Token != "  pa ss  " {
+		t.Errorf("text path mangled the value: %q", viaText.Token)
+	}
+	if viaText.Token != "  pa ss  " || c.Token != "  pa ss  " {
+		t.Errorf("two env paths diverge: tag path %q vs text path %q", c.Token, viaText.Token)
+	}
+}

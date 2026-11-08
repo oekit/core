@@ -237,3 +237,68 @@ func TestManager_Drain_NoPendingRequests(t *testing.T) {
 		t.Errorf("expected Drain to return quickly, took %v", elapsed)
 	}
 }
+
+// TestZeroTimeoutMeansNoDeadline 回归 core#86：New(0) + Add(..., 0) 此前把 0
+// 直接喂给 context.WithTimeout——立即到期，每个 closer 拿到的 ctx 都已
+// deadline exceeded，资源实际未关却对外打「shutdown completed」。0/负数
+// 现在定义为「显式无超时」：closer 的 ctx 不带 deadline，跑多久都等它返回。
+func TestZeroTimeoutMeansNoDeadline(t *testing.T) {
+	m := New(0)
+	sawDeadline := true
+	closerDone := make(chan struct{})
+	m.Add("res", func(ctx context.Context) error {
+		if ctx.Err() == nil {
+			sawDeadline = false // ctx 未立即取消：0 没有被解释成立即超时
+		}
+		if _, has := ctx.Deadline(); has {
+			t.Error("zero timeout must not attach a deadline to the closer ctx")
+		}
+		close(closerDone)
+		return nil
+	}, 0)
+	m.Shutdown(context.Background())
+	select {
+	case <-closerDone:
+	default:
+		t.Fatal("closer never ran")
+	}
+	if sawDeadline {
+		t.Error("closer observed ctx already cancelled — zero timeout was treated as immediate timeout (core#86)")
+	}
+	if errs := m.Errors(); len(errs) != 0 {
+		t.Errorf("shutdown must complete without errors under zero timeout, got %v", errs)
+	}
+
+	// 负数同样不限时
+	m2 := New(time.Second)
+	m2.Add("neg", func(ctx context.Context) error {
+		if _, has := ctx.Deadline(); has {
+			t.Error("negative timeout must not attach a deadline either")
+		}
+		return nil
+	}, -1)
+	m2.Shutdown(context.Background())
+	if errs := m2.Errors(); len(errs) != 0 {
+		t.Errorf("negative timeout shutdown must be error-free, got %v", errs)
+	}
+
+	// 默认超时非 0 时 Add(0) 仍取 Manager 默认（历史行为不变）：
+	// closer 会在默认预算内拿到 deadline（超时对不读 ctx 的 closer 无感，
+	// 这里让 closer 响应 ctx 才能观察到期效果）
+	m3 := New(50 * time.Millisecond)
+	m3.Add("res", func(ctx context.Context) error {
+		if _, has := ctx.Deadline(); !has {
+			t.Error("Add(...,0) must inherit the manager default timeout (deadline expected)")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err() // 超过默认预算 → 拿到 deadline exceeded
+		case <-time.After(5 * time.Second):
+			return nil
+		}
+	}, 0)
+	m3.Shutdown(context.Background())
+	if errs := m3.Errors(); len(errs) != 1 {
+		t.Errorf("closer overrunning the default budget must fail with the deadline, got %v", errs)
+	}
+}

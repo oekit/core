@@ -382,3 +382,60 @@ func TestStrictStillRejectsUnknownAnchorHolder(t *testing.T) {
 		t.Fatalf("应报 _base 的 UnknownKeyError，got %v", err)
 	}
 }
+
+// TestStrictInlineMapKeys 回归 core#82：`yaml:",inline"` 的 map 字段此前不登记
+// 任何键，它吸收的任意键被上层结构体判成「未知配置键」直接拒载——合法 YAML
+// 在严格模式下起不来（同一文件非严格模式正常）。inline map 存在时该层不再有
+// 未知键，且 map 元素若是结构体，其内部未知键仍要被严格模式抓住。
+func TestStrictInlineMapKeys(t *testing.T) {
+	type inner struct {
+		Extra map[string]any `yaml:",inline"`
+	}
+	type cfg struct {
+		A     int            `yaml:"a"`
+		Extra map[string]any `yaml:",inline"`
+	}
+	var c cfg
+	data := []byte("a: 1\nfoo: bar\nnested:\n  x: 2\n")
+	if err := Unmarshal(data, &c, WithStrict()); err != nil {
+		t.Fatalf("strict mode rejected config with inline map: %v", err)
+	}
+	if c.A != 1 || c.Extra["foo"] != "bar" || c.Extra["nested"].(map[string]any)["x"] != 2 {
+		t.Errorf("inline map keys not decoded: %+v", c)
+	}
+
+	// 嵌套 inline（结构体内含 inline struct，后者才是 inline map）：yaml.v3
+	// 只在直接解码层兑现 inline map——嵌套 inline 里的 map 吸收的键被静默
+	// 丢弃（实测解码后 Extra 为空）。严格模式把这类键判成未知键是对的：
+	// 「配置写了但哪儿都没去」正是要拦的静默丢失。
+	type wrapper struct {
+		A  int   `yaml:"a"`
+		In inner `yaml:",inline"`
+	}
+	var w wrapper
+	err := Unmarshal([]byte("a: 1\nfoo: bar\n"), &w, WithStrict())
+	if err == nil || !strings.Contains(err.Error(), "未知配置键") {
+		t.Errorf("keys swallowed by nested inline map should be flagged, got %v", err)
+	}
+
+	// inline map 的元素类型是结构体时，值内部未知键照样拒载
+	type elem struct {
+		OK int `yaml:"ok"`
+	}
+	type strictVals struct {
+		Extra map[string]elem `yaml:",inline"`
+	}
+	var sv strictVals
+	err2 := Unmarshal([]byte("item:\n  ok: 1\n  bad: 2\n"), &sv, WithStrict())
+	if err2 == nil || !strings.Contains(err2.Error(), "未知配置键") {
+		t.Errorf("unknown key inside inline-map struct value must still fail, got %v", err2)
+	}
+
+	// 对照：没有 inline map 的结构体未知键照旧拒载（豁免只对 inline map 生效）
+	var plain struct {
+		A int `yaml:"a"`
+	}
+	if err := Unmarshal([]byte("a: 1\nfoo: bar\n"), &plain, WithStrict()); err == nil {
+		t.Error("unknown key must still be rejected when no inline map exists")
+	}
+}
