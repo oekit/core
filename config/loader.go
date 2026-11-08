@@ -128,23 +128,24 @@ func wrapEnvParseError(original, expanded []byte, err error) error {
 	if errors.As(err, &uke) {
 		return nil
 	}
+	// 原文语法探测（非 nil 返回 = 不包装）：原文本身解析合法才可能是 env
+	// 注入值破坏语法；原文解析失败说明错误在文件里，env 不是元凶。
 	var probe yaml.Node
-	if yaml.Unmarshal(original, &probe) != nil {
-		return nil
-	}
-	var keys []string
-	for _, m := range envPattern.FindAllSubmatch(original, -1) {
-		name := string(m[1])
-		if _, ok := os.LookupEnv(name); ok && !slices.Contains(keys, name) {
-			keys = append(keys, fmt.Sprintf("${%s}", name))
+	if yaml.Unmarshal(original, &probe) == nil {
+		var keys []string
+		for _, m := range envPattern.FindAllSubmatch(original, -1) {
+			name := string(m[1])
+			if _, ok := os.LookupEnv(name); ok && !slices.Contains(keys, name) {
+				keys = append(keys, fmt.Sprintf("${%s}", name))
+			}
+		}
+		if len(keys) > 0 {
+			sort.Strings(keys)
+			return fmt.Errorf("yaml became unparseable after expanding env placeholders (%s): %w — an injected env value likely broke its scalar context; inject it via ApplyEnvOverlay instead",
+				strings.Join(keys, ", "), err)
 		}
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-	sort.Strings(keys)
-	return fmt.Errorf("yaml became unparseable after expanding env placeholders (%s): %w — an injected env value likely broke its scalar context; inject it via ApplyEnvOverlay instead",
-		strings.Join(keys, ", "), err)
+	return nil
 }
 
 // wrapFileError 给解码错误补上文件路径上下文。
