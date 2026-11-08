@@ -37,6 +37,13 @@ func TestIsPublicIP(t *testing.T) {
 		{"special 192.0.0/24", net.ParseIP("192.0.0.1"), false},
 		{"link local 169.254/16", net.ParseIP("169.254.1.1"), false},
 		{"unspecified", net.ParseIP("0.0.0.0"), false},
+		// ---- core#98：0.0.0.0/8 与 fec0::/10 全段拒绝 ----
+		{"this network 0.0.0.0/8 non-zero", net.ParseIP("0.1.2.3"), false},
+		{"this network 0.0.0.0/8 upper edge", net.ParseIP("0.255.255.255"), false},
+		{"public control 1.1.1.1", net.ParseIP("1.1.1.1"), true},
+		{"ipv6 site-local fec0::/10", net.ParseIP("fec0::1"), false},
+		{"ipv6 site-local fec0::/10 upper edge", net.ParseIP("feff:ffff::1"), false},
+		{"ipv6 ula fc00::/7 lower half", net.ParseIP("fc00::1"), false},
 		// ---- core#73：IANA IPv6 Special-Purpose 段全部拒绝（issue 表格 13 例） ----
 		{"ipv6 doc 2001:db8::/32", net.ParseIP("2001:db8::1"), false},
 		{"ipv6 doc 3fff::/20", net.ParseIP("3fff::1"), false},
@@ -63,6 +70,44 @@ func TestIsPublicIP(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsPublicIP(tt.ip); got != tt.want {
 				t.Errorf("IsPublicIP() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsPublicIPIssue98Samples 钉住 core#98 报告的两类误判地址与验收负对照。
+// 0.1.2.3（0.0.0.0/8 内非零，IsUnspecified 抓不到）与 fec0::1（site-local，
+// IsPrivate/IsLinkLocalUnicast 都覆盖不到）此前被误判公网，与同生态
+// urlguard 的阻断结论矛盾。负对照钉住「不能靠收紧到整体拒绝蒙过去」：
+// 真公网地址（1.1.1.1、2606:4700::1）必须仍放行（core#53 老教训），
+// 既有拒绝行为（0.0.0.0、fe80::1、fc00::1、10.0.0.1）不回归。
+// 变异性负对照由表驱动保证：还原两处补丁，0.1.2.3 / fec0::1 两条即转红。
+func TestIsPublicIPIssue98Samples(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   string
+		want bool
+	}{
+		// core#98 现象复现（issue 表格两行）
+		{"this network 0.1.2.3", "0.1.2.3", false},
+		{"site-local fec0::1", "fec0::1", false},
+		// 负对照：真公网仍放行
+		{"public control 1.1.1.1", "1.1.1.1", true},
+		{"ipv6 public control 2606:4700::1", "2606:4700::1", true},
+		// 负对照：既有拒绝行为不回归（issue 验收第 3 条）
+		{"unspecified 0.0.0.0", "0.0.0.0", false},
+		{"link local fe80::1", "fe80::1", false},
+		{"ula fc00::1", "fc00::1", false},
+		{"private 10.0.0.1", "10.0.0.1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			if ip == nil {
+				t.Fatalf("net.ParseIP(%q) = nil, 前提不成立", tt.ip)
+			}
+			if got := IsPublicIP(ip); got != tt.want {
+				t.Errorf("IsPublicIP(%v) = %v, want %v", tt.ip, got, tt.want)
 			}
 		})
 	}
