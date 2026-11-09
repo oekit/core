@@ -1,5 +1,12 @@
 
 
+## [v0.13.6] — 2026-11-10
+
+- - fix(config): ApplyEnvOverlay 对未显式命中的字段不再强制 zeroable/overwrite 清零——struct 块下推合并、指针块 nil/零点不清 dst，env 显式零值形态保留（#101）
+- - fix(config): deepCopyValue 按指针身份记忆已拷贝节点，指针环不再栈溢出，环内/DAG 共享保留且不别名（#102）
+
+关联问题单：core#101、core#102。
+
 ## [v0.13.5] — 2026-11-09
 
 - fix(network): IsPublicIP 补 0.0.0.0/8 与 fec0::/10 特殊用途段判定（#98）
