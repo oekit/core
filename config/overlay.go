@@ -88,20 +88,26 @@ func deepMergeMaps(a, b map[string]any) map[string]any {
 // 与 ApplyEnv（只填零值字段，「yaml 显式值优先」）语义相反——本函数实现
 // 「env 优先于配置文件」的 12-factor 场景（Helm/docker-compose 靠 env 传配置）。
 //
-// 等价手写：
+// 等价手写（合并一步走本包内部专用的 env 合并变体，见下）：
 //
 //	overlay := &T{}
 //	set := FieldSet{}
 //	_ = ApplyEnv(overlay, WithFieldSet(set)) // 空结构体上解 env → 命中补记进 set
-//	OverlayMergeExplicit(dst, overlay, set)  // env 命中即覆盖（含显式零值）
+//	overlayMergeEnv(dst, overlay, set)       // env 命中即覆盖（含显式零值）
 //
 // **env 命中即覆盖，含显式零值**（core#50）：`KUBOARD_MCP_ENABLED=false` 能把
 // 文件里的 true 关掉、`APP_PORT=0` 能把非零端口清零。此前走 OverlayMerge 的
 // 「非零值才覆盖」模型，env 显式设置的 false/0 落进 overlay 后被当零值跳过，
 // 永远压不过文件值——12-factor 宿主最常见的布尔开关表达法（`ENV=false 关功能`）
-// 因此静默失效，本函数现改走 OverlayMergeExplicit（显式集合逃生门，见 merge.go）。
+// 因此静默失效，本函数现改走显式集合逃生门（core#50）+ 专用 env 合并变体
+// （overlayMergeEnv，见 merge.go）。
 //
-// env 未设置（或显式空串/纯空白）的字段不影响 dst（不进命中集合）。
+// env 未设置（或显式空串/纯空白）的字段不影响 dst（不进命中集合）——**对
+// merge:"overwrite"/"zeroable" 字段同样成立**（core#101）：env overlay 里
+// 未命中字段恒为零值工件，若按 overwrite/zeroable 语义无条件写入，结构体
+// 同时用于 OverlayMerge 热更（overwrite）与本函数（12-factor）时，后者每次
+// 执行都会把 overwrite/zeroable 字段静默清掉。env 变体下未命中字段的零值
+// 一律跳过，非零值仍按 merge tag 语义覆盖。
 // env 值无法按字段类型解析时 fail-closed 报错；可传 WithLenientEnv 转为
 // WARN + 跳过——被跳过的字段不进命中集合，不会用零值清掉 dst 的文件值
 // （见 fieldset.go）。
@@ -139,7 +145,7 @@ func ApplyEnvOverlay[T any](dst *T, opts ...PassOption) error {
 			g.val.Set(reflect.Zero(g.val.Type()))
 		}
 	}
-	OverlayMergeExplicit(dst, &overlay, set)
+	overlayMergeEnv(dst, &overlay, set)
 	return nil
 }
 
