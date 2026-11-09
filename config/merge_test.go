@@ -413,3 +413,94 @@ func TestOverwriteStructDeepCopy(t *testing.T) {
 		t.Errorf("array-of-struct aliasing: src.Cells=%+v", srcA.Cells)
 	}
 }
+
+// TestOverwriteDeepCopyPointerCycle 回归 core#102：#84 深拷贝修复把浅 Set
+// 换成无环检测的递归拷贝，src 出现指针环（自引用/互引 struct）时无限递归
+// → fatal error: stack overflow 崩进程（exit 2），导出函数 OverlayMerge /
+// OverlayMergeExplicit 可直接触发。现 deepCopyValue 按指针身份记忆已拷贝
+// 节点，环上第二次访问直接返回已拷贝节点；环内结构共享关系保留，且 dst
+// 与 src 不得别名。
+func TestOverwriteDeepCopyPointerCycle(t *testing.T) {
+	type node struct {
+		Name string
+		Next *node
+	}
+	type cfg struct {
+		Chain *node `merge:"overwrite"` // 指针 overwrite：走 deepCopyValue 指针分支
+		Block node  `merge:"overwrite"` // 值 struct overwrite：走 struct 分支
+	}
+
+	// 双节点互指成环 + 单节点自环
+	a, b := &node{Name: "a"}, &node{Name: "b"}
+	a.Next, b.Next = b, a
+	self := &node{Name: "self"}
+	self.Next = self
+
+	src := &cfg{Chain: a, Block: node{Name: "block", Next: b}}
+	dst := &cfg{}
+	OverlayMerge(dst, src) // 修复前：stack overflow 崩进程
+
+	if dst.Chain == nil || dst.Chain.Name != "a" {
+		t.Fatalf("Chain = %+v, want copy of a", dst.Chain)
+	}
+	if dst.Chain.Next == nil || dst.Chain.Next.Name != "b" {
+		t.Fatalf("Chain.Next = %+v, want copy of b", dst.Chain.Next)
+	}
+	if dst.Chain.Next.Next != dst.Chain {
+		t.Fatal("mutual cycle must be preserved in the copy")
+	}
+	if dst.Block.Name != "block" {
+		t.Fatalf("Block = %+v, want copy of src.Block", dst.Block)
+	}
+	// Block 与 Chain 是两次独立的 deepCopyValue 调用（各自 visited 集），
+	// Block.Next 是环 b 的又一份拷贝：环内闭合、但不与 src 别名。
+	if dst.Block.Next == nil || dst.Block.Next.Name != "b" ||
+		dst.Block.Next.Next == nil || dst.Block.Next.Next.Name != "a" ||
+		dst.Block.Next.Next.Next != dst.Block.Next {
+		t.Fatalf("Block.Next = %+v, want a closed copy of the a<->b cycle (b2->a2->b2)", dst.Block.Next)
+	}
+	if dst.Block.Next == b {
+		t.Fatal("Block.Next must not alias src")
+	}
+
+	// 不与 src 别名：改 dst 不得泄漏到 src
+	dst.Chain.Name = "MUT"
+	dst.Chain.Next.Name = "MUT"
+	if a.Name != "a" || b.Name != "b" {
+		t.Errorf("dst mutation leaked into src cycle: a=%s b=%s", a.Name, b.Name)
+	}
+	if dst.Chain == a || dst.Chain.Next == b {
+		t.Fatal("copy must not alias src pointers")
+	}
+
+	// 自环
+	src2 := &cfg{Chain: self}
+	dst2 := &cfg{}
+	OverlayMerge(dst2, src2)
+	if dst2.Chain == nil || dst2.Chain.Name != "self" || dst2.Chain.Next != dst2.Chain {
+		t.Fatalf("self cycle copy broken: %+v", dst2.Chain)
+	}
+	if dst2.Chain == self {
+		t.Fatal("self cycle copy must not alias src")
+	}
+
+	// DAG 共享结构（非环）保留身份：**同一次** deepCopyValue（同一 overwrite
+	// struct 内部）两个指针指向同一节点，拷贝后仍同一身份——结构共享关系
+	// 原样保留。visited 集按调用隔离：合并层逐字段两次深拷贝各自独立。
+	type pair struct {
+		P1, P2 *node
+	}
+	type holder struct {
+		Pair pair `merge:"overwrite"`
+	}
+	shared := &node{Name: "shared"}
+	src3 := &holder{Pair: pair{P1: shared, P2: shared}}
+	dst3 := &holder{}
+	OverlayMerge(dst3, src3)
+	if dst3.Pair.P1 == nil || dst3.Pair.P1.Name != "shared" || dst3.Pair.P2 != dst3.Pair.P1 {
+		t.Fatal("shared (non-cyclic) pointer identity must be preserved within one deep copy")
+	}
+	if dst3.Pair.P1 == shared {
+		t.Fatal("shared pointer copy must not alias src")
+	}
+}
