@@ -30,6 +30,11 @@ func OverlayMerge[T any](dst *T, src *T) {
 // 集合通常来自 ApplyEnv 对 FieldSet 的补记——只含标量 / []string 叶子路径；
 // 切片字段按整体替换（不递归到 `Items[0].Qty` 这类元素路径），struct 路径
 // 不参与（继续下推到叶子）。
+//
+// 注意：未命中路径沿用 OverlayMerge 语义，merge:"overwrite"/"zeroable" 仍会
+// 强制写入 src 零值。ApplyEnvOverlay 走 overlayMergeEnv（见下）——env 未命中
+// 的字段零值即跳过，否则结构体同时用于热更（overwrite）与 env overlay 时，
+// 后者每次执行都会把 overwrite 字段静默清掉（core#101）。
 func OverlayMergeExplicit[T any](dst *T, src *T, explicit FieldSet) {
 	// nil 防护：reflect.ValueOf(nil 指针).Elem() 直接 panic
 	if dst == nil || src == nil {
@@ -37,7 +42,29 @@ func OverlayMergeExplicit[T any](dst *T, src *T, explicit FieldSet) {
 	}
 	dstVal := reflect.ValueOf(dst).Elem()
 	srcVal := reflect.ValueOf(src).Elem()
-	overlayFields(dstVal, srcVal, "", explicit)
+	overlayFields(dstVal, srcVal, "", explicit, false)
+}
+
+// overlayMergeEnv 是 ApplyEnvOverlay 专用的合并入口（core#101）：在
+// OverlayMergeExplicit「explicit 命中无条件取 src 值（含零值）」的基础上，
+// 对**未命中**的字段禁用 merge:"overwrite"/"zeroable" 的零值强制覆盖。
+//
+// 为什么需要变体：env overlay 内部是零值结构体，env 未命中的字段恒为零值
+// 工件（nil map / nil slice / false / 零值 struct）。若按 overwrite/zeroable
+// 语义无条件写入，凡配置结构体同时用于 OverlayMerge 热更（overwrite 语义）
+// 与 ApplyEnvOverlay（12-factor），后者每次执行都会把 overwrite/zeroable
+// 字段静默清掉——违背 ApplyEnvOverlay「env 未设置的字段不影响 dst」的文档
+// 契约。env 变体下：零值即跳过，除非 explicit 命中。
+//
+// 未导出：该语义只对「env 产出的 overlay + 命中集合」成对成立，不作为独立
+// 公共原语暴露。
+func overlayMergeEnv[T any](dst *T, src *T, explicit FieldSet) {
+	if dst == nil || src == nil {
+		return
+	}
+	dstVal := reflect.ValueOf(dst).Elem()
+	srcVal := reflect.ValueOf(src).Elem()
+	overlayFields(dstVal, srcVal, "", explicit, true)
 }
 
 // isZeroable 检查 tag 是否包含 "zeroable"。
@@ -47,7 +74,9 @@ func isZeroable(tag string) bool {
 
 // overlayFields 深度合并 src 到 dst；path 是当前层级的字段路径前缀，
 // explicit 命中的字段无条件取 src 值（含零值，见 OverlayMergeExplicit）。
-func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
+// envOverlay 为 true 时走 ApplyEnvOverlay 的 env 变体（core#101，见
+// overlayMergeEnv）：未命中字段的 zeroable/overwrite 零值强制失效。
+func overlayFields(dst, src reflect.Value, path string, explicit FieldSet, envOverlay bool) {
 	if dst.Kind() != reflect.Struct || src.Kind() != reflect.Struct {
 		return
 	}
@@ -67,18 +96,22 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 		forced := explicit.Has(fpath)
 
 		tag := t.Field(i).Tag.Get("merge")
+		// env 变体（core#101）：env 未命中的 overlay 字段恒为零值，零值
+		// 强制覆盖会把 dst 的文件值静默清掉——zeroable/overwrite 只在
+		// explicit 命中（forced）时才允许写零值。
+		zeroForce := isZeroable(tag) && !envOverlay
 
 		switch srcField.Kind() {
 		case reflect.String:
-			if forced || isZeroable(tag) || srcField.String() != "" {
+			if forced || zeroForce || srcField.String() != "" {
 				dstField.SetString(srcField.String())
 			}
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			if forced || isZeroable(tag) || srcField.Int() != 0 {
+			if forced || zeroForce || srcField.Int() != 0 {
 				dstField.SetInt(srcField.Int())
 			}
 		case reflect.Float32, reflect.Float64:
-			if forced || isZeroable(tag) || srcField.Float() != 0 {
+			if forced || zeroForce || srcField.Float() != 0 {
 				dstField.SetFloat(srcField.Float())
 			}
 		case reflect.Bool:
@@ -89,7 +122,7 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 				dstField.SetBool(srcField.Bool())
 			case tag == "bool_or":
 				dstField.SetBool(dstField.Bool() || srcField.Bool())
-			case isZeroable(tag) || srcField.Bool():
+			case zeroForce || srcField.Bool():
 				dstField.SetBool(srcField.Bool())
 			}
 		case reflect.Slice:
@@ -97,21 +130,21 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 			// 存在时**不做**整体替换——整块换会把 dst 元素里非 env 命中的字段
 			// 清成零值；逐元素下推合并，dst 只有 env 命中的字段取 src 值。
 			if hasElementExplicit(explicit, fpath) {
-				mergeSliceElements(dstField, srcField, fpath, explicit)
+				mergeSliceElements(dstField, srcField, fpath, explicit, envOverlay)
 				continue
 			}
-			if forced || isZeroable(tag) || srcField.Len() > 0 {
+			if forced || zeroForce || srcField.Len() > 0 {
 				// 深拷贝(2026-09-06 复审修复):直接 Set 会让 dst 与 src
 				// 共享底层数组,合并后改 dst 元素会反向污染 src
 				dstField.Set(deepCopyValue(srcField))
 			}
 		case reflect.Map:
-			if forced || isZeroable(tag) || srcField.Len() > 0 {
+			if forced || zeroForce || srcField.Len() > 0 {
 				// 深拷贝:map 是引用类型,共享后两侧写操作互相可见
 				dstField.Set(deepCopyValue(srcField))
 			}
 		case reflect.Array:
-			if forced || isZeroable(tag) || !srcField.IsZero() {
+			if forced || zeroForce || !srcField.IsZero() {
 				// 深拷贝（core#84 同族）:数组整体 Set 是值拷贝,但元素是
 				// struct/引用类型时底层 map/slice 仍共享
 				dstField.Set(deepCopyValue(srcField))
@@ -120,6 +153,15 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 			// zeroable 对 struct 同样生效：零值 struct = 显式清空该配置块
 			// （此前被静默当成默认合并,运维无法通过远程配置整体清零）。
 			// 显式集合不含 struct 路径（ApplyEnv 只补记标量叶子）——继续下推。
+			if envOverlay && !forced {
+				// env 变体（core#101）：env overlay 的块内非全零 ⟺ 块内有
+				// env 命中叶子（ApplyEnv 只写命中字段）。overwrite 整体替换
+				// 与 zeroable 零值清块都会把未命中字段清零，违背「env 未设置
+				// 的字段不影响 dst」——一律下推合并：命中叶子强制覆盖，未
+				// 命中保持 dst 值；全零块下推是空操作（各字段零值非命中即跳过）。
+				overlayFields(dstField, srcField, fpath, explicit, envOverlay)
+				break
+			}
 			switch {
 			case tag == "overwrite":
 				// 深拷贝（core#84/#90）：整体 Set 是 Go 值语义的**浅**拷贝，
@@ -129,34 +171,44 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet) {
 			case tag == "zeroable" && srcField.IsZero():
 				dstField.SetZero()
 			default:
-				overlayFields(dstField, srcField, fpath, explicit)
+				overlayFields(dstField, srcField, fpath, explicit, envOverlay)
 			}
 		case reflect.Pointer:
 			// zeroable 的 nil 同样是有效值：远程配置缺块 = 显式清空
 			// （dst 保持旧值会让"删除配置块"的热更语义失效）
-			if tag == "zeroable" && srcField.IsNil() {
-				dstField.SetZero()
-				continue
-			}
 			if srcField.IsNil() {
+				if envOverlay {
+					// env 变体（core#101）：nil（含 zeroable 的 nil）= env
+					// 未命中该字段，不写零值、不清 dst。
+					continue
+				}
+				if tag == "zeroable" {
+					dstField.SetZero()
+				}
 				continue
 			}
-			if srcField.Elem().Kind() == reflect.Struct && tag != "overwrite" {
-				if tag == "zeroable" && srcField.Elem().IsZero() {
+			if srcField.Elem().Kind() == reflect.Struct && (tag != "overwrite" || envOverlay) {
+				if !envOverlay && tag == "zeroable" && srcField.Elem().IsZero() {
 					dstField.SetZero() // nil 化：清空该配置块
+					continue
+				}
+				if envOverlay && srcField.Elem().IsZero() && !hasNestedExplicit(explicit, fpath) {
+					// env 变体（core#101）：env 未命中该块（点内无命中叶子，
+					// 含「env 显式零值」例外——后者在 explicit 里有嵌套路径）
+					// 时不下推，dst 的 nil 点不凭空分配零值结构。
 					continue
 				}
 				if dstField.IsNil() {
 					dstField.Set(reflect.New(srcField.Elem().Type()))
 				}
-				overlayFields(dstField.Elem(), srcField.Elem(), fpath, explicit)
+				overlayFields(dstField.Elem(), srcField.Elem(), fpath, explicit, envOverlay)
 			} else {
 				// 深拷贝:非 struct 指针(*string/*int 等)与 overwrite 指针
 				// 原实现共享 pointee,改 dst 可见 src
 				dstField.Set(deepCopyValue(srcField))
 			}
 		default:
-			if forced || isZeroable(tag) || !srcField.IsZero() {
+			if forced || zeroForce || !srcField.IsZero() {
 				dstField.Set(srcField)
 			}
 		}
@@ -179,13 +231,30 @@ func hasElementExplicit(explicit FieldSet, fpath string) bool {
 	return false
 }
 
+// hasNestedExplicit 报告 explicit 里是否有严格落在 fpath 之下的路径
+// （前缀 fpath+"."，如 fpath=="Server" 时命中 "Server.Port"）。env 变体的
+// 指针下推判定用（core#101）：「env 显式零值」（SERVER_PORT=0）命中的叶子
+// 在 src 里仍是零值，单看 src.IsZero() 会漏判，须查命中集合。
+func hasNestedExplicit(explicit FieldSet, fpath string) bool {
+	if explicit == nil {
+		return false
+	}
+	prefix := fpath + "."
+	for k := range explicit {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeSliceElements 逐元素下推合并：[]struct 元素按 struct 合并（非命中
 // 字段保持 dst 值，命中字段取 src 值），[]*struct 元素两两解引用合并、dst
 // 元素为 nil 时深拷贝 src 元素补位。dst 比 src 长时多余元素原样保留；
 // src 更长时多余元素深拷贝追加（外部直接调 OverlayMergeExplicit 的防御路径
 // ——ApplyEnvOverlay 两侧长度相等）。路径带下标（Items[0].Limit），与
 // ApplyEnv 补记进 FieldSet 的键同口径。
-func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit FieldSet) {
+func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit FieldSet, envOverlay bool) {
 	elem := dstField.Type().Elem()
 	for j := 0; j < srcField.Len(); j++ {
 		epath := fmt.Sprintf("%s[%d]", fpath, j)
@@ -198,7 +267,7 @@ func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit
 		de := dstField.Index(j)
 		switch {
 		case elem.Kind() == reflect.Struct:
-			overlayFields(de, se, epath, explicit)
+			overlayFields(de, se, epath, explicit, envOverlay)
 		case elem.Kind() == reflect.Pointer && elem.Elem().Kind() == reflect.Struct:
 			if se.IsNil() {
 				continue
@@ -207,7 +276,7 @@ func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit
 				de.Set(deepCopyValue(se))
 				continue
 			}
-			overlayFields(de.Elem(), se.Elem(), epath, explicit)
+			overlayFields(de.Elem(), se.Elem(), epath, explicit, envOverlay)
 		}
 	}
 }
@@ -217,7 +286,20 @@ func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit
 // （core#84：overwrite 指针解引用后仍与 src 共享底层 map/slice），须逐字段
 // 递归；数组同理（元素是 struct 时整体赋值仍共享）。仅用于 OverlayMerge 的
 // 合并路径(config 合并是低频操作,开销可忽略)。
+//
+// 指针环安全（core#102）：#84 深拷贝修复把浅 Set 换成无环检测的递归拷贝，
+// src 出现指针环（自引用/互引 struct）时无限递归 → fatal error: stack
+// overflow 崩进程。现按**指针身份**记忆已拷贝节点——环上第二次访问直接
+// 返回已拷贝节点，终止递归；环内结构共享关系原样保留（src 里两个指针指向
+// 同一块，拷贝后仍指向同一块）。环必须经指针闭合（Go 无值环），指针分支
+// 「先注册新节点、再下探内容」即可兜住全部环形态。
 func deepCopyValue(v reflect.Value) reflect.Value {
+	return deepCopyVisited(v, map[uintptr]reflect.Value{})
+}
+
+// deepCopyVisited 是 deepCopyValue 的递归体；visited 键为 src 指针地址
+// （拷贝期间 src 不被分配/移动，地址即身份），值为对应的新拷贝。
+func deepCopyVisited(v reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
 	if !v.IsValid() {
 		return v
 	}
@@ -229,7 +311,7 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 		out := reflect.MakeMapWithSize(v.Type(), v.Len())
 		iter := v.MapRange()
 		for iter.Next() {
-			out.SetMapIndex(deepCopyValue(iter.Key()), deepCopyValue(iter.Value()))
+			out.SetMapIndex(deepCopyVisited(iter.Key(), visited), deepCopyVisited(iter.Value(), visited))
 		}
 		return out
 	case reflect.Slice:
@@ -238,13 +320,13 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 		}
 		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
 		for i := 0; i < v.Len(); i++ {
-			out.Index(i).Set(deepCopyValue(v.Index(i)))
+			out.Index(i).Set(deepCopyVisited(v.Index(i), visited))
 		}
 		return out
 	case reflect.Array:
 		out := reflect.New(v.Type()).Elem()
 		for i := 0; i < v.Len(); i++ {
-			out.Index(i).Set(deepCopyValue(v.Index(i)))
+			out.Index(i).Set(deepCopyVisited(v.Index(i), visited))
 		}
 		return out
 	case reflect.Struct:
@@ -258,15 +340,19 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 			if !f.CanSet() {
 				continue
 			}
-			f.Set(deepCopyValue(v.Field(i)))
+			f.Set(deepCopyVisited(v.Field(i), visited))
 		}
 		return out
 	case reflect.Pointer:
 		if v.IsNil() {
 			return v
 		}
+		if out, ok := visited[v.Pointer()]; ok {
+			return out // 环闭合（core#102）：返回已拷贝节点，结构共享
+		}
 		out := reflect.New(v.Type().Elem())
-		out.Elem().Set(deepCopyValue(v.Elem()))
+		visited[v.Pointer()] = out // 先注册再下探：自引用环在此终止
+		out.Elem().Set(deepCopyVisited(v.Elem(), visited))
 		return out
 	case reflect.Interface:
 		if v.IsNil() {
@@ -274,7 +360,7 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 		}
 		// 拷贝动态值,避免接口内隐藏的 map/slice 别名(concrete 值对
 		// 接口字段可赋值)
-		return deepCopyValue(v.Elem())
+		return deepCopyVisited(v.Elem(), visited)
 	default:
 		return v
 	}
