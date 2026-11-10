@@ -30,10 +30,11 @@ func (s FieldSet) Has(path string) bool {
 type PassOption func(*passConfig)
 
 type passConfig struct {
-	set           FieldSet
-	envNamingLint bool
-	envNaming     EnvNaming
-	lenientEnv    bool
+	set            FieldSet
+	envNamingLint  bool
+	envNaming      EnvNaming
+	lenientEnv     bool
+	trimEnvStrings bool
 }
 
 // WithFieldSet 传入显式提供集合：命中的路径视为「已有调用方值」——
@@ -66,6 +67,38 @@ func WithEnvNamingLint() PassOption {
 // 被跳过的字段不进 env 命中集合，也就不会用零值清掉 dst 的文件值。
 func WithLenientEnv() PassOption {
 	return func(c *passConfig) { c.lenientEnv = true }
+}
+
+// WithTrimStrings 开启 ApplyEnv 的**裁剪档**（#104）：字符串字段的 env 值写入前
+// 裁掉首尾空白。
+//
+// 默认不裁——core#88 的语义（口令/token 两端空格是合法内容，静默裁剪会让认证
+// 失败现场与配置现场对不上）仍是缺省。本档是给升级消费方的部署侧补档：部署
+// 文件里的空白几乎都是意外（尾随空格的 token 一直 401、带空白的枚举值让服务
+// 起不来），且「字段枚举校验在 ApplyEnv 内部就会拒载」的宿主需要一个库级的
+// 正规出口，而不是各自手搓 ApplyEnv 之后的反射步。
+//
+// 边界（文档钉死）：
+//   - 与「口令真含首尾空格」的场景互斥——需要那种口令的部署**不该开**这个档；
+//   - 只作用于**字符串字段**：非字符串类型解析前本就裁剪（数值/布尔/duration
+//     文法不容空白），不受本档影响；
+//   - 枚举（options）校验发生在裁剪**之后**（接线顺序 ApplyEnv → FillDefaults →
+//     ValidateTags，校验看到的是裁剪后的最终值）——`TOKEN=" v4 "` + 本档 ⇒
+//     字段为 v4、options 校验通过；不开档则原样写入并被校验拒载；
+//   - 「env 设为空串/纯空白视同未设置」的判定不受影响（判定用裁剪值，先于写入）。
+//
+// 可与 WithFieldSet / WithEnvNaming / WithLenientEnv 叠加；ApplyEnvOverlay 透传
+// 本选项——12-factor（env 优先）路径同样生效。
+func WithTrimStrings() PassOption {
+	return func(c *passConfig) { c.trimEnvStrings = true }
+}
+
+// WithEnvTrimStrings 是 WithTrimStrings 的 LoadOption 版（#104）：挂在 Unmarshal /
+// LoadFile / LoadBootstrap 上，使 tag 接线里的 ApplyEnv 环节裁剪 env 值首尾空白
+// （FillDefaults / ValidateTags 不受影响）。默认不裁（core#88 语义不变）。
+// 语义与边界见 WithTrimStrings。
+func WithEnvTrimStrings() LoadOption {
+	return func(o *loadOptions) { o.trimEnvStrings = true }
 }
 
 func buildPassConfig(opts []PassOption) *passConfig {

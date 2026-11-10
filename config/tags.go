@@ -73,8 +73,9 @@ func FillDefaults(v any, opts ...PassOption) error {
 // 报错（错误信息携带字段路径与变量名）——可传 WithLenientEnv 转为 WARN + 跳过
 // （见 fieldset.go）。**字符串字段写入原始 env 值**（core#88）：首尾空白是
 // 口令/token 的合法内容，不做裁剪——与 ${VAR} 文本替换路径同值；非字符串
-// 类型解析前仍裁剪（数值/布尔/duration 文法不容空白）。支持类型与遍历范围
-// 同 FillDefaults。
+// 类型解析前仍裁剪（数值/布尔/duration 文法不容空白）。传 WithTrimStrings
+// （#104）可开启裁剪档：字符串字段写入前裁掉首尾空白（部署侧显式补档，
+// 边界见 fieldset.go）。支持类型与遍历范围同 FillDefaults。
 //
 // v 必须是非 nil 的结构体指针，否则返回错误。
 func ApplyEnv(v any, opts ...PassOption) error {
@@ -84,7 +85,7 @@ func ApplyEnv(v any, opts ...PassOption) error {
 	}
 	cfg := buildPassConfig(opts)
 	apply := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
-		return applyEnvField(sf, fv, path, yamlPath, addr, cfg.set, cfg.envNaming, cfg.lenientEnv)
+		return applyEnvField(sf, fv, path, yamlPath, addr, cfg.set, cfg.envNaming, cfg.lenientEnv, cfg.trimEnvStrings)
 	}
 	if err := walkTaggedStruct(rv, "", "", true, true, apply); err != nil {
 		return fmt.Errorf("config: ApplyEnv: %w", err)
@@ -137,8 +138,9 @@ func ValidateTags(v any, opts ...PassOption) error {
 // 并带 FieldSet 保留 YAML 显式零值。非结构体配置类型（如 map）不适用 struct
 // tag，直接跳过以保持既有行为。
 //
-// naming 是 env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
-func applyTagPasses(cfg any, yamlData []byte, naming EnvNaming) error {
+// o 携带 env 命名策略（前缀 / 逐字段覆盖，见 envnaming.go）与 env 值裁剪开关
+// （WithEnvTrimStrings，#104）。
+func applyTagPasses(cfg any, yamlData []byte, o loadOptions) error {
 	rv := reflect.ValueOf(cfg)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
 		return nil
@@ -147,22 +149,29 @@ func applyTagPasses(cfg any, yamlData []byte, naming EnvNaming) error {
 	if err != nil {
 		return err
 	}
-	if err := ApplyEnv(cfg, WithFieldSet(set), WithEnvNaming(naming)); err != nil {
+	envOpts := make([]PassOption, 0, 3)
+	envOpts = append(envOpts, WithFieldSet(set), WithEnvNaming(o.envNaming))
+	if o.trimEnvStrings {
+		envOpts = append(envOpts, WithTrimStrings())
+	}
+	if err := ApplyEnv(cfg, envOpts...); err != nil {
 		return err
 	}
 	if err := FillDefaults(cfg, WithFieldSet(set)); err != nil {
 		return err
 	}
-	return ValidateTags(cfg, WithFieldSet(set), WithEnvNaming(naming))
+	return ValidateTags(cfg, WithFieldSet(set), WithEnvNaming(o.envNaming))
 }
 
 // ApplyTagPasses 对任意结构体指针执行完整 tag 接线：先按 yamlData 构建
 // FieldSet，再 ApplyEnv → FillDefaults → ValidateTags。与 LoadBootstrap 内部
 // 同一套语义；热更 / 手写 loader 可直接复用。
 //
-// 可传 WithEnvNaming 启用 env 命名策略（前缀 / 逐字段覆盖）。
+// 可传 WithEnvNaming 启用 env 命名策略（前缀 / 逐字段覆盖）；可传
+// WithTrimStrings 使 ApplyEnv 裁剪 env 值首尾空白（#104）。
 func ApplyTagPasses(cfg any, yamlData []byte, opts ...PassOption) error {
-	return applyTagPasses(cfg, yamlData, buildPassConfig(opts).envNaming)
+	pc := buildPassConfig(opts)
+	return applyTagPasses(cfg, yamlData, loadOptions{envNaming: pc.envNaming, trimEnvStrings: pc.trimEnvStrings})
 }
 
 // targetStructValue 校验 v 是非 nil 的结构体指针并返回其 Elem()，
@@ -352,12 +361,13 @@ func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string, set
 // applyEnvField 是 ApplyEnv 的单字段处理：env 已设置（非空）且字段为零值时，
 // 按字段类型解析环境变量值并写入。FieldSet 命中的路径（yaml 显式提供）不覆盖；
 // 成功写入后补记进 FieldSet。lenient 开启时解析失败 WARN + 跳过（不补记，
-// core#51 宽容档），缺省 fail-closed。
+// core#51 宽容档），缺省 fail-closed；trim 开启时字符串字段写入前裁掉首尾
+// 空白（#104 WithTrimStrings），缺省按 core#88 写原始值。
 //
 // env 名按 EnvNaming 的顺序解析（覆盖表 → env tag → 路径派生名，见 envnaming.go）：
 // 覆盖表命中即用表里的绝对名；否则用 env tag（有前缀则加前缀）；都没有且设了
 // 前缀时按 yaml 键路径派生名。
-func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool, set FieldSet, n EnvNaming, lenient bool) error {
+func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool, set FieldSet, n EnvNaming, lenient, trim bool) error {
 	binding := resolveEnvName(sf, yamlPath, addr, n)
 	if binding.name == "" {
 		return nil
@@ -379,7 +389,12 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath stri
 	// 签名串两端空格可能是合法内容，静默裁剪会让认证失败现场与配置现场
 	// 对不上；${VAR} 文本替换路径本就不裁剪，两条路径须同值。非字符串类型
 	// 解析前仍裁剪（数值/布尔/duration 文法不容空白，裁剪是解析容错）。
+	// 裁剪档（#104 WithTrimStrings）例外：调用方显式声明部署空白皆意外，
+	// 字符串字段写入前裁掉首尾空白。
 	if fv.Kind() == reflect.String {
+		if trim {
+			raw = strings.TrimSpace(raw)
+		}
 		fv.SetString(raw)
 		if set != nil {
 			set[path] = true
