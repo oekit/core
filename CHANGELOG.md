@@ -1,5 +1,13 @@
 
 
+## [v0.14.2] — 2026-11-11
+
+- fix(network): GetLocalIP 的 POD_IP 校验补上**非回环 / 非未指定**语义判据——127.0.0.1（回环）与 0.0.0.0（未指定）不再原样返回，与形状非法（not-an-ip、带端口、IPv6）同路 WARN 后回退网卡探测（#120）：core#87 的判据只有 `net.ParseIP + To4`（只挡「不是 IPv4 形状」），而 doc 契约明写「非回环 IPv4」——`POD_IP=127.0.0.1` / `0.0.0.0` 形状合法、语义非法，此前 err=nil 原样直达注册面，与同文件 podIPFallback 对回环打 ERROR（「回环地址不可被其他节点拨号」）的口径相反，同一地址在两条路径一静默一报警；判据改 net.IP 标准方法（IsLoopback/IsUnspecified，v4-mapped 写法 `::ffff:127.0.0.1` 同判），WARN 文案改为「不是合法的非回环 IPv4」与判据同口径；顺带把网卡探测失败的 errors.New 收敛为包级哨兵 errNoLocalIP（errors.Is 可判，测试不再正则扒文案）
+
+关联问题单：core#120。
+
+本版使用的现代语言特性：errors.Is（errNoLocalIP 哨兵判定——测试对「网卡探测失败」走 errors.Is，替代逐字匹配错误文案）；strings.Cut（测试从 WARN 日志摘 pod_ip 属性值——`strings.Cut(out, "pod_ip=")` 切前缀取注入值原文，钉住可观测面第一现场带值）。
+
 ## [v0.14.1] — 2026-11-11
 
 - fix(config): OverlaySource.Watch 的子源 goroutine **就地 recover**——消费方 onChange 回调 / 子源实现的 panic 收编为 ERROR 日志（值 + 栈），不再打死进程（#119）：此前每个子源的 Watch 在裸 goroutine 里执行（无 recover），而 onChange 是消费方回调（ConfigWatcher.Start → Reload → OnChange 注册的函数），回调 panic 发生在无人 recover 的 goroutine 里 ⇒ 整个进程崩溃，调用方自己 goroutine 上的 defer recover() 拦不到（recover 只对当前 goroutine 生效）；与 chain/timeout.go 的 goroutine 内 recover 纪律对齐；发生 panic 的子源监听终止、其余子源不受牵连；顺带清掉原实现里第二个裸 goroutine（wg.Wait 汇合协程——无观察者、无可 panic 路径，Watch 的契约本就是「启动监听后即返回」）

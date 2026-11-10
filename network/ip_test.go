@@ -1,7 +1,11 @@
 package network
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -166,6 +170,71 @@ func TestGetLocalIPPODIPValidation(t *testing.T) {
 			// 回退路径：要么拿到网卡 IPv4，要么报「找不到」的错——两者都不是注入串
 			if err == nil && ip == "" {
 				t.Error("GetLocalIP() = empty string with nil error")
+			}
+		})
+	}
+}
+
+// TestGetLocalIPPODIPRejectsLoopbackAndUnspecified 回归（core#120）：POD_IP 的
+// 校验不能只判「是 IPv4」——127.0.0.1 / 0.0.0.0 形状合法但语义非法（回环地址
+// 不可被其他节点拨号，podIPFallback 对回环打 ERROR 级日志、注册侧 fail-closed
+// 拒绝；0.0.0.0 是未指定地址），core#87 的判据（ParseIP + To4）把它们原样放行
+// 且零日志，与同文件口径相反。语义非法必须与形状非法同路：WARN 后回退网卡探测。
+// 断言三层：绝不原样返回 / 回退结果是非回环 IPv4 或走 errNoLocalIP 明确报错 /
+// WARN 留痕且携带注入值（pod_ip 属性是「注入错了」的第一现场）。v4-mapped
+// 写法（::ffff:x.x.x.x）与点分十进制同判——同一判据两种书写形态。
+func TestGetLocalIPPODIPRejectsLoopbackAndUnspecified(t *testing.T) {
+	bads := []string{
+		"127.0.0.1", "127.0.0.53", // 回环 127/8（IsLoopback 判前缀）
+		"0.0.0.0",                            // 未指定（IsUnspecified）
+		"::ffff:127.0.0.1", "::ffff:0.0.0.0", // 上两者的 v4-mapped 写法
+	}
+	for _, bad := range bads {
+		t.Run(bad, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			defer slog.SetDefault(prev)
+
+			t.Setenv("POD_IP", bad)
+			ip, err := GetLocalIP()
+			if err == nil && ip == bad {
+				t.Fatalf("GetLocalIP() 原样返回了语义非法的 POD_IP %q（err=nil）", ip)
+			}
+			if err == nil {
+				p := net.ParseIP(ip)
+				if p == nil || p.To4() == nil || p.IsLoopback() || p.IsUnspecified() {
+					t.Errorf("GetLocalIP() 回退结果 %q 不是非回环 IPv4", ip)
+				}
+			} else if !errors.Is(err, errNoLocalIP) {
+				t.Errorf("GetLocalIP() 错误应是网卡探测失败哨兵 errNoLocalIP，得到 %v", err)
+			}
+
+			out := buf.String()
+			if !strings.Contains(out, "level=WARN") {
+				t.Fatalf("语义非法 POD_IP 必须打 WARN 后回退，实际日志：\n%s", out)
+			}
+			for _, want := range []string{"network.podip", "不是合法的非回环 IPv4"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("WARN 日志应包含 %q（观测口径与判据一致），实际日志：\n%s", want, out)
+				}
+			}
+			// WARN 必须携带注入值原文（strings.Cut 取 pod_ip 属性）——运维靠它
+			// 定位「K8s 模板注入错了」，少了它只剩一句文案无从下手。
+			_, rest, ok := strings.Cut(out, "pod_ip=")
+			if !ok {
+				t.Fatalf("WARN 日志缺 pod_ip 属性，实际日志：\n%s", out)
+			}
+			line, _, _ := strings.Cut(rest, "\n")
+			got, _, _ := strings.Cut(line, " ")
+			if v := strings.Trim(got, `"`); v != bad {
+				t.Errorf("WARN 的 pod_ip 属性 = %q, want %q", v, bad)
+			}
+
+			// GetPodIP 是 uidgen/nacos/registry 的委托入口：同样不得静默放行
+			//（拿不到网卡地址时经 podIPFallback 返回 127.0.0.1 但必须有 ERROR）。
+			if got := GetPodIP(); got == bad && !strings.Contains(out, "level=ERROR") {
+				t.Errorf("GetPodIP() 静默返回了语义非法的 POD_IP %q（无 ERROR 级回退日志）", got)
 			}
 		})
 	}

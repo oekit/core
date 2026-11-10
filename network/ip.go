@@ -192,23 +192,32 @@ func GetServerIP() string {
 	return iIP
 }
 
+// errNoLocalIP 是 GetLocalIP 网卡探测拿不到可用地址时的哨兵错误（包级唯一，
+// 便于调用方 errors.Is 判定，替代每处 errors.New 的匿名错误）。
+var errNoLocalIP = errors.New("network: no suitable local IP found")
+
 // GetLocalIP 返回本机首选非回环 IPv4 地址。
 // 优先读取 POD_IP 环境变量（K8s 注入），其次遍历网卡获取第一个非回环 IPv4。
 // 未找到时返回错误。这是 ekit 中获取本机 IP 的唯一实现，
 // uidgen、nacos、registry 等包应委托至此，避免逻辑重复。
 //
-// POD_IP 经 net.ParseIP 校验且必须是 IPv4（本函数契约是「非回环 IPv4」）：
-// 注入串写错（not-an-ip、带端口的 1.2.3.4:8080、IPv6）不再原样返回
-// （core#87 此前 err=nil 且错误地址直达注册面，与同文件其余路径的
-// fail-closed 口径相反）——非法值打 WARN 后忽略，回退网卡探测。
+// POD_IP 经 net.ParseIP 校验，必须是 IPv4 且**非回环、非未指定**（本函数契约是
+// 「非回环 IPv4」，core#87 只挡了「形状非法」，core#120 补上「语义非法」）：
+// 注入串写错（not-an-ip、带端口的 1.2.3.4:8080、IPv6）与语义非法（127.0.0.1
+// 等回环、0.0.0.0 未指定——以它们注册的实例不可被其他节点拨号，同文件
+// podIPFallback 对回环是 ERROR 级口径）都不再原样返回（core#87 此前 err=nil
+// 且错误地址直达注册面，与同文件其余路径的 fail-closed 口径相反）——非法值打
+// WARN 后忽略，回退网卡探测；判据用 net.IP 标准方法，v4-mapped 写法
+// （::ffff:127.0.0.1）同判。
 func GetLocalIP() (string, error) {
 	if ip := os.Getenv("POD_IP"); ip != "" {
-		if p := net.ParseIP(ip); p != nil && p.To4() != nil {
+		if p := net.ParseIP(ip); p != nil && p.To4() != nil &&
+			!p.IsLoopback() && !p.IsUnspecified() {
 			return ip, nil
 		}
-		// 非法/非 IPv4：不中断（拿不到 IP 的代价是注册不可达，回退探测
-		// 仍有救），但必须可观测——静默忽略等于把「注入错了」藏起来。
-		slog.Warn("network: POD_IP 不是合法 IPv4，忽略并回退网卡探测",
+		// 非法/非 IPv4/回环/未指定：不中断（拿不到 IP 的代价是注册不可达，
+		// 回退探测仍有救），但必须可观测——静默忽略等于把「注入错了」藏起来。
+		slog.Warn("network: POD_IP 不是合法的非回环 IPv4，忽略并回退网卡探测",
 			"component", "network.podip", "pod_ip", ip)
 	}
 	addrs, err := net.InterfaceAddrs()
@@ -220,7 +229,7 @@ func GetLocalIP() (string, error) {
 			return ipNet.IP.String(), nil
 		}
 	}
-	return "", errors.New("network: no suitable local IP found")
+	return "", errNoLocalIP
 }
 
 // GetPodIP 返回本机 IP 地址（无 error 版本，适合无法处理 error 的注册场景）。
