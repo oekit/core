@@ -1,5 +1,16 @@
 
 
+## [v0.14.1] — 2026-11-11
+
+- fix(config): OverlaySource.Watch 的子源 goroutine **就地 recover**——消费方 onChange 回调 / 子源实现的 panic 收编为 ERROR 日志（值 + 栈），不再打死进程（#119）：此前每个子源的 Watch 在裸 goroutine 里执行（无 recover），而 onChange 是消费方回调（ConfigWatcher.Start → Reload → OnChange 注册的函数），回调 panic 发生在无人 recover 的 goroutine 里 ⇒ 整个进程崩溃，调用方自己 goroutine 上的 defer recover() 拦不到（recover 只对当前 goroutine 生效）；与 chain/timeout.go 的 goroutine 内 recover 纪律对齐；发生 panic 的子源监听终止、其余子源不受牵连；顺带清掉原实现里第二个裸 goroutine（wg.Wait 汇合协程——无观察者、无可 panic 路径，Watch 的契约本就是「启动监听后即返回」）
+- fix(governance): Parse 对 json.Unmarshal 错误改**双 %w**——ErrInvalidConfig 哨兵与 *json.SyntaxError / *json.UnmarshalTypeError 同时在链上，errors.As 可辨、UnmarshalTypeError 自带的 Struct/Field 结构化定位不丢（#118）：此前 %v 把链拍平成纯文本，配置解析失败只能正则扒非契约文案分流（"of type map[string]int" 随版本/字段变动即断，kitx#70 同构换仓复发）；错误文案逐字不变（双 %w 与 %v 的渲染一致，只差链深度）
+- fix(chain): Timeout(0) 定义为**显式无超时**——原样透传 next（不派生 ctx、不加 deadline，下游回到调用方 goroutine 上执行，Recovery 的 recover 恢复生效），负值构造期 panic（fail-loud，AGENTS.md Option 总则①）（#117）：此前 0/负值无检查地喂给 context.WithTimeout 立即到期，超时来自配置面时零值透传的服务「进程活着、全量请求瞬死」且无指向性日志；与 lifecycle 在 core#86 确立的「0 = 显式无超时」口径统一（governance.Validate 里「hertz timeout 中间件 0 立即到期」的过时注释同步勘误）
+- fix(lifecycle): Manager.Shutdown 改**收敛循环**——每轮锁内取「尚未执行的尾部增量」、锁外执行，直到取空（对齐 bootstrap closeAll 范式），关停执行期间经 Add / AddTeardown 注册的 closer/teardown 不再被静默漏调（#116）：此前进入 once.Do 后一次性拷贝 jobs 快照、只执行快照内的任务，快照拷贝后追加的任务零日志零错误漏调、Errors() 恒空（nacos 延迟注册形态下 = 注册中心幽灵实例存活到心跳超时）；补齐执行保持注册序、失败与快照内任务同口径进 Errors()；Add/AddTeardown godoc 写明关停期注册契约
+
+关联问题单：core#116、core#117、core#118、core#119。
+
+本版使用的现代语言特性：Go 1.20 多错误包装（fmt.Errorf 双 %w，#118 修复本体）；errors.Join（#116 测试侧聚合 Errors() 后 errors.Is 逐一定位哨兵——运维对账的同款形态）；泛型辅助函数 pendingBatch[T]（#116，teardown/jobs 两个收敛循环共享同一「锁内取增量、锁外执行」原语）；for range int（Go 1.22 range-over-int，#116 测试的批量注册与 #119 测试的轮询等待）。
+
 ## [v0.14.0] — 2026-11-10
 
 - - feat(config): WithTrimStrings/WithEnvTrimStrings——ApplyEnv/Load 字符串字段可选裁剪档，默认不裁（#104）
