@@ -120,6 +120,13 @@ func (m *Manager) IsAccepting() bool {
 // 都等它返回（core#86：0 曾被直接喂给 context.WithTimeout，立即到期，资源
 // 未关却对外报「shutdown completed」）。0/负数 = 显式无超时，与
 // SetDrainTimeout 的「负数不限时」口径对齐。
+//
+// 关停期间注册（core#116）：Shutdown 已开始后经 Add 登记的任务**不会被
+// 静默漏调**——Shutdown 按收敛循环执行（每轮锁内取增量、锁外执行，直到
+// 取空），执行期间 Add 的任务会被本次关停补齐执行、顺序保持注册序；仅
+// 「最后一批任务执行完毕后的收尾瞬间」并发注册的极端时序仍可能漏掉（与
+// bootstrap closeAll 同一取舍）——关停开始后不应再注册资源，延迟拿到
+// 反注册句柄（nacos 延迟注册）的场景应在已注册 closer 的执行期内完成登记。
 func (m *Manager) Add(name string, closer func(ctx context.Context) error, timeout time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -135,6 +142,8 @@ func (m *Manager) AddCloser(name string, closer interface{ Close() error }, time
 }
 
 // AddTeardown 注册一个无参数的清理函数（不接受 context，不返回 error）。
+// 关停期间注册的口径与 Add 相同（core#116）：teardown 执行期间经
+// AddTeardown 登记的函数会被本次关停补齐执行，不静默漏调。
 func (m *Manager) AddTeardown(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -223,6 +232,8 @@ func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
 // 执行的任务（外部取消/超时会中止当前任务），不作为任务间共享的总预算；
 // 需要全局兜底时请为每个任务设置合理超时（Add 的 timeout 参数）。
 // 任务 panic 被隔离为错误记录，不会中断剩余清理。
+// 关停执行期间经 Add / AddTeardown 新注册的任务同样会被补齐执行（收敛
+// 循环，core#116），不静默漏调——见 Add 的 godoc。
 // 多次调用是安全的，只有第一次调用会执行清理。
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.once.Do(func() {
@@ -230,38 +241,68 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		m.stopAccepting()
 		m.logger.Info("stopped accepting new requests")
 
-		// 2. 先执行 teardowns
-		m.mu.Lock()
-		teardowns := make([]func(), len(m.teardowns))
-		copy(teardowns, m.teardowns)
-		jobs := make([]job, len(m.jobs))
-		copy(jobs, m.jobs)
-		m.mu.Unlock()
-
-		for _, fn := range teardowns {
-			if err := runFunc("teardown", fn); err != nil {
-				m.mu.Lock()
-				m.shutdownErrs = append(m.shutdownErrs, err)
-				m.mu.Unlock()
-				m.logger.Error("teardown failed", "err", err)
+		// 2. 执行 teardowns —— 收敛循环（core#116）：每轮锁内取「尚未执行的
+		// 尾部增量」、锁外执行，直到一轮取空。此前是入口处一次性快照，
+		// 快照拷贝之后经 AddTeardown 追加的函数被静默漏调（零日志零错误）。
+		teardownDone := 0
+		for {
+			batch := pendingBatch(&m.mu, &m.teardowns, &teardownDone)
+			if len(batch) == 0 {
+				break
+			}
+			for _, fn := range batch {
+				if err := runFunc("teardown", fn); err != nil {
+					m.mu.Lock()
+					m.shutdownErrs = append(m.shutdownErrs, err)
+					m.mu.Unlock()
+					m.logger.Error("teardown failed", "err", err)
+				}
 			}
 		}
 
-		// 3. 再执行 closer jobs（使用本地副本，避免读 m.jobs 时与 Add 竞争）
-		for _, j := range jobs {
-			if err := m.runCloser(j, ctx); err != nil {
-				m.mu.Lock()
-				m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
-				m.mu.Unlock()
-				m.logger.Error("resource close failed", "resource", j.name, "err", err)
-			} else {
-				m.logger.Info("resource closed", "resource", j.name)
+		// 3. 执行 closer jobs —— 同款收敛循环：closer 执行期间经 Add 登记
+		// 的任务（nacos 延迟注册的反注册句柄）在下一轮被补齐执行，失败
+		// 与快照内任务同口径进 shutdownErrs。
+		jobsDone := 0
+		for {
+			batch := pendingBatch(&m.mu, &m.jobs, &jobsDone)
+			if len(batch) == 0 {
+				break
+			}
+			for _, j := range batch {
+				if err := m.runCloser(j, ctx); err != nil {
+					m.mu.Lock()
+					m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
+					m.mu.Unlock()
+					m.logger.Error("resource close failed", "resource", j.name, "err", err)
+				} else {
+					m.logger.Info("resource closed", "resource", j.name)
+				}
 			}
 		}
 
 		m.shutdownDone.Store(true)
 		m.logger.Info("shutdown completed")
 	})
+}
+
+// pendingBatch 取「*src 中尚未消费的尾部增量」快照并推进 done 游标，锁内
+// 完成（core#116 收敛循环的原语）。*src 只追加不收缩（Add/AddTeardown 均
+// append-only，追加可能重分配底层数组但不动已有元素），done 之前的前缀已
+// 全部执行、下标稳定；快照在锁内拷出，执行在锁外进行——与 Add 的 append
+// 及消费方回调（可能在 closer 执行期内再 Add）互不持锁，无死锁、无竞争。
+// 每轮取空即返回 nil，调用方据此结束循环。
+func pendingBatch[T any](mu *sync.Mutex, src *[]T, done *int) []T {
+	mu.Lock()
+	defer mu.Unlock()
+	n := len(*src)
+	if *done >= n {
+		return nil
+	}
+	batch := make([]T, n-*done)
+	copy(batch, (*src)[*done:])
+	*done = n
+	return batch
 }
 
 // runFunc 执行无参清理函数并隔离 panic：panic 会跳过剩余清理任务，
