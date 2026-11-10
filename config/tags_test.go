@@ -608,3 +608,141 @@ func TestApplyEnvPreservesWhitespace(t *testing.T) {
 		t.Errorf("two env paths diverge: tag path %q vs text path %q", c.Token, viaText.Token)
 	}
 }
+
+// ---- ApplyEnv 裁剪档（#104 WithTrimStrings）----
+
+func TestApplyEnv_WithTrimStringsTrimsStringFields(t *testing.T) {
+	t.Setenv("TRIM_TEST_TOKEN", "  abc  ")
+	t.Setenv("TRIM_TEST_MODE", " v4 ")
+	t.Setenv("TRIM_TEST_NUM", " 42 ")
+	t.Setenv("TRIM_TEST_HOSTS", " a.com , b.com ")
+
+	cfg := struct {
+		Token string   `env:"TRIM_TEST_TOKEN"`
+		Mode  string   `env:"TRIM_TEST_MODE" options:"v4,v5,auto"`
+		Num   int      `env:"TRIM_TEST_NUM"`
+		Hosts []string `env:"TRIM_TEST_HOSTS"`
+	}{}
+	if err := ApplyEnv(&cfg, WithTrimStrings()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Token != "abc" {
+		t.Errorf("Token = %q, 期望裁剪后 %q（#104）", cfg.Token, "abc")
+	}
+	if cfg.Mode != "v4" {
+		t.Errorf("Mode = %q, 期望裁剪后 v4", cfg.Mode)
+	}
+	if cfg.Num != 42 {
+		t.Errorf("Num = %d, 期望 42（非字符串类型解析前本就裁剪）", cfg.Num)
+	}
+	if got := strings.Join(cfg.Hosts, ","); got != "a.com,b.com" {
+		t.Errorf("Hosts = %v, 期望 [a.com b.com]", cfg.Hosts)
+	}
+	// 边界声明：枚举校验发生在裁剪之后——裁剪后的值必须过 options 校验
+	if err := ValidateTags(&cfg); err != nil {
+		t.Errorf("裁剪后 options 校验应通过: %v", err)
+	}
+}
+
+// TestApplyEnv_WithoutTrimStringsKeepsRawValue 缺省档与 v0.13.5 现状逐字节一致：
+// 字符串字段原样写入（core#88），带空白的枚举值被 options 校验拒载（升级消费方
+// 的第二类故障形态——服务起不来）。
+func TestApplyEnv_WithoutTrimStringsKeepsRawValue(t *testing.T) {
+	t.Setenv("TRIM_TEST_TOKEN", "  abc  ")
+	t.Setenv("TRIM_TEST_MODE", " v4 ")
+
+	cfg := struct {
+		Token string `env:"TRIM_TEST_TOKEN"`
+		Mode  string `env:"TRIM_TEST_MODE" options:"v4,v5,auto"`
+	}{}
+	if err := ApplyEnv(&cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Token != "  abc  " {
+		t.Errorf("Token = %q, 期望原样 %q（core#88 语义为缺省）", cfg.Token, "  abc  ")
+	}
+	if err := ValidateTags(&cfg); err == nil {
+		t.Error("带空白的枚举值应被 options 校验拒载（不开档的现状）")
+	}
+}
+
+func TestApplyEnv_WithTrimStringsWhitespaceOnlyStillUnset(t *testing.T) {
+	t.Setenv("TRIM_TEST_WS", "   ")
+	cfg := struct {
+		A string `env:"TRIM_TEST_WS"`
+	}{}
+	if err := ApplyEnv(&cfg, WithTrimStrings()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.A != "" {
+		t.Errorf("纯空白 env 应视同未设置, got %q", cfg.A)
+	}
+}
+
+func TestApplyTagPasses_WithTrimStrings(t *testing.T) {
+	t.Setenv("TRIM_TEST_PASS_MODE", " v4 ")
+	cfg := struct {
+		Name string `yaml:"name"`
+		Mode string `yaml:"mode" env:"TRIM_TEST_PASS_MODE" options:"v4,v5,auto"`
+	}{}
+	if err := ApplyTagPasses(&cfg, []byte("name: svc\n"), WithTrimStrings()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != "v4" {
+		t.Errorf("Mode = %q, 期望裁剪后 v4", cfg.Mode)
+	}
+}
+
+// TestApplyTagPasses_WithoutTrimStringsRejectsBlankPaddedEnum 不开档的接线现状：
+// 带空白的枚举值在 ValidateTags 拒载（升级消费方实证的「服务起不来」形态）。
+func TestApplyTagPasses_WithoutTrimStringsRejectsBlankPaddedEnum(t *testing.T) {
+	t.Setenv("TRIM_TEST_PASS_MODE", " v4 ")
+	cfg := struct {
+		Mode string `yaml:"mode" env:"TRIM_TEST_PASS_MODE" options:"v4,v5,auto"`
+	}{}
+	err := ApplyTagPasses(&cfg, nil)
+	if err == nil {
+		t.Fatal("带空白的枚举值应拒载（不开档现状）")
+	}
+	if !strings.Contains(err.Error(), "options") {
+		t.Errorf("错误应指向 options 校验, got %v", err)
+	}
+}
+
+// TestUnmarshal_WithEnvTrimStrings LoadOption 接线：WithEnvTrimStrings 挂在
+// Unmarshal / LoadFile / LoadBootstrap 上使 ApplyEnv 环节裁剪；不开档同输入拒载。
+func TestUnmarshal_WithEnvTrimStrings(t *testing.T) {
+	t.Setenv("TRIM_TEST_LOPT_MODE", " auto ")
+
+	var cfg struct {
+		Mode string `yaml:"mode" env:"TRIM_TEST_LOPT_MODE" options:"v4,v5,auto"`
+	}
+	if err := Unmarshal(nil, &cfg, WithEnvTrimStrings()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != "auto" {
+		t.Errorf("Mode = %q, 期望裁剪后 auto", cfg.Mode)
+	}
+
+	var cfg2 struct {
+		Mode string `yaml:"mode" env:"TRIM_TEST_LOPT_MODE" options:"v4,v5,auto"`
+	}
+	if err := Unmarshal(nil, &cfg2); err == nil {
+		t.Fatal("不开档时带空白的枚举值应拒载（现状）")
+	}
+}
+
+// TestApplyEnvOverlay_WithTrimStrings 裁剪档透传 ApplyEnvOverlay（12-factor
+// env 优先路径同样生效）。
+func TestApplyEnvOverlay_WithTrimStrings(t *testing.T) {
+	t.Setenv("TRIM_TEST_OVL_TOKEN", "  tok  ")
+	dst := struct {
+		Token string `yaml:"token" env:"TRIM_TEST_OVL_TOKEN"`
+	}{Token: "file-value"}
+	if err := ApplyEnvOverlay(&dst, WithTrimStrings()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dst.Token != "tok" {
+		t.Errorf("Token = %q, 期望 env 优先覆盖为裁剪后 tok", dst.Token)
+	}
+}

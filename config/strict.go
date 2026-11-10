@@ -62,6 +62,9 @@ type loadOptions struct {
 	strict bool
 	// envNaming env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
 	envNaming EnvNaming
+	// trimEnvStrings ApplyEnv 写字符串字段前裁剪 env 值首尾空白（#104，
+	// WithEnvTrimStrings）——见 fieldset.go 的 WithTrimStrings。
+	trimEnvStrings bool
 }
 
 // WithStrict 严格模式：**未知键直接拒载**，不做静默忽略。
