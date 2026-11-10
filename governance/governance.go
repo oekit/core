@@ -75,10 +75,16 @@ type Config struct {
 }
 
 // Parse 从 Nacos 配置内容(JSON)解析并校验治理模板。
+//
+// 解析失败的错误链同时挂 ErrInvalidConfig 哨兵与 json.Unmarshal 的原始
+// 错误（双 %w，core#118）——*json.SyntaxError / *json.UnmarshalTypeError
+// 经 errors.As 可辨，UnmarshalTypeError 自带的 Struct/Field 结构化定位
+// 不丢失，配置解析失败可按错误类型分流（语法损坏 vs 字段类型不符）。
+// %v 会把链拍平成纯文本，两类失败不可区分（kitx#70 同款缺陷）。
 func Parse(data []byte) (*Config, error) {
 	cfg := &Config{}
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -98,8 +104,9 @@ func (c *Config) Validate() error {
 	}
 	for key, ms := range c.TimeoutMs {
 		// ms=0 拒绝：kitex 对 <=0 走"无超时"fast path（等价关闭超时保护，
-		// server hang 时请求无限堆积）；hertz timeout 中间件 0 同样立即到
-		// 期。清空超时用删除 timeout_ms 段表达，不靠 0 值。
+		// server hang 时请求无限堆积）。chain.Timeout(0) 现与 lifecycle 同口径
+		// 定义为「显式无超时」（core#117），模板里的 0 不再承担「关闭超时」
+		// 的歧义语义——清空超时用删除 timeout_ms 段表达，不靠 0 值。
 		if ms <= 0 {
 			return fmt.Errorf("%w: timeout_ms[%q]=%d must be positive", ErrInvalidConfig, key, ms)
 		}
