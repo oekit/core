@@ -4,15 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
-	"sync"
+	"runtime/debug"
 )
 
 // OverlaySource 把多个 ConfigSource 组合为一个：
 //
 //   - Read：按参数顺序逐个读取并深合并（后者覆盖前者），返回合并后的 blob。
 //     任一子源读取失败即返回该错误
-//   - Watch：任一子源变化即触发 onChange（扇入），ctx 取消传播到全部子源
+//   - Watch：任一子源变化即触发 onChange（扇入），ctx 取消传播到全部子源。
+//     每个子源的 Watch 与 onChange 回调都跑在**受保护 goroutine** 上：panic
+//     就地 recover 并打 ERROR 留痕，不打死进程（core#119）——onChange 是
+//     消费方回调（热更路径上的消费方代码），recover 只对当前 goroutine
+//     生效，调用方 goroutine 上的 recover 拦不到这里逃逸的 panic；发生
+//     panic 的那个子源的监听随之终止（不重试，重试会放大消费方 bug 的
+//     副作用面），其余子源不受牵连
 //
 // 合并语义为 JSON blob 级深合并（对象递归、标量/数组整体覆盖），与
 // OverlayMerge 的结构体级合并互补——多来源场景推荐
@@ -53,18 +60,31 @@ func (o *overlaySource) Read() ([]byte, error) {
 }
 
 func (o *overlaySource) Watch(ctx context.Context, onChange func()) {
-	var wg sync.WaitGroup
+	// **在 goroutine 内 recover**（core#119，与 chain/timeout.go 同款纪律）：
+	// 子源 Watch 会同步调用消费方的 onChange 回调，而 recover 只对当前
+	// goroutine 生效——回调 panic 若无人收编就是进程级退出，调用方自己的
+	// defer recover() 根本看不到。panic 打 ERROR（值 + 栈）留痕后该子源
+	// 监听终止，其余子源继续（扇入互不牵连）。
 	for _, src := range o.srcs {
-		wg.Add(1)
-		s := src
 		go func() {
-			defer wg.Done()
-			s.Watch(ctx, onChange)
+			defer func() {
+				if r := recover(); r != nil {
+					// 缺省出口与 chain.Timeout 的迟到 panic 同形态：不留痕
+					// 的 recover 等于把故障藏起来，排障时只剩「配置不热更」
+					// 一个假象，真实肇因（消费方回调 / 子源实现）埋在栈底。
+					slog.Default().With("component", "config-overlay").Error(
+						"[panic] OverlaySource 子源 Watch / onChange 回调 panic（已收编，进程不受影响）",
+						"panic", r,
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
+			src.Watch(ctx, onChange)
 		}()
 	}
-	go func() {
-		wg.Wait() // ctx 取消后各子源 Watch 返回，扇入 goroutine 随之退出
-	}()
+	// 不设汇合 goroutine：Watch 的契约是「启动监听后即返回」，没有需要
+	// 等待的汇合点；各子源 goroutine 的生命周期由 ctx 取消驱动（子源自行
+	// 观察，ConfigSource 契约），或被上方的 recover 出口终止。
 }
 
 // deepMergeMaps 深合并 b 到 a（b 覆盖 a）：map 递归合并，其余类型整体覆盖。
