@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"runtime/debug"
 	"sync"
@@ -48,6 +49,18 @@ func reportIsolatedPtr(reporter func(context.Context, *PanicError), ctx context.
 // Timeout 返回超时中间件：为下游派生带 deadline 的 ctx，超时先到即返回
 // context.DeadlineExceeded。
 //
+// d 的语义与 lifecycle.Manager 的「显式无超时」口径统一（core#86 ⇒ core#117）：
+//   - d > 0：正常超时保护；
+//   - d == 0：**显式无超时**——原样透传 next（不派生 ctx、不加 deadline，
+//     下游回到调用方 goroutine 上执行）。配置零值透传（如
+//     `chain.Timeout(cfg.ReadTimeout)` 的 cfg 未配置）不再等价「每请求 0ms
+//     瞬死于 DeadlineExceeded」；要表达「无超时保护」就显式传 0。
+//     透传形态下 WithLatePanicReporter 无意义（无独立 goroutine 即无迟到
+//     panic），Recovery 的 recover 在调用方 goroutine 上恢复生效；
+//   - d < 0：构造期 panic（fail-loud，AGENTS.md「Option 非法值总则①」）。
+//     负值只可能来自上游计算错误，静默产出「立即到期」的中间件会让全量
+//     请求瞬死且没有任何指向性日志（core#117）。
+//
 // 语义边界：与 go-kratos 相同——若下游 handler 不理会 ctx 取消（阻塞在
 // 不受 ctx 控制的 IO 上），超时返回后其 goroutine 仍在后台运行至自然结束，
 // 本中间件无法强制中断。
@@ -59,6 +72,18 @@ func reportIsolatedPtr(reporter func(context.Context, *PanicError), ctx context.
 //     放进了新 goroutine ⇒ 迟到的 *PanicError* 只写进一个**没人读**的缓冲
 //     channel ⇒ 不进错误链、不上报，观测面完全丢失。
 func Timeout(d time.Duration, opts ...TimeoutOption) Middleware {
+	if d < 0 {
+		panic(fmt.Sprintf(
+			"chain.Timeout: 负值超时 %v（fail-loud，core#117）——负值只会来自上游计算错误，"+
+				"静默放行会产出立即到期的中间件（全量请求 DeadlineExceeded）；0 表示显式无超时，正值为超时预算",
+			d,
+		))
+	}
+	if d == 0 {
+		// 显式无超时（core#117，与 lifecycle core#86 口径统一）：恒等中间件，
+		// 不把下游放进独立 goroutine、不派生带 deadline 的 ctx。
+		return func(next Handler) Handler { return next }
+	}
 	cfg := &timeoutConfig{}
 	for _, opt := range opts {
 		opt(cfg)
