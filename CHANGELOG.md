@@ -1,5 +1,11 @@
 
 
+## [v0.14.0] — 2026-11-10
+
+- - feat(config): WithTrimStrings/WithEnvTrimStrings——ApplyEnv/Load 字符串字段可选裁剪档，默认不裁（#104）
+
+关联问题单：core#104。
+
 ## [v0.13.6] — 2026-11-10
 
 - - fix(config): ApplyEnvOverlay 对未显式命中的字段不再强制 zeroable/overwrite 清零——struct 块下推合并、指针块 nil/零点不清 dst，env 显式零值形态保留（#101）
