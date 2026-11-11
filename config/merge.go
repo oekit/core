@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	"github.com/oekit/pkg/reflectx"
 )
 
 // OverlayMerge 将 src 中非零值字段覆盖合并到 dst 中，支持嵌套结构体。
@@ -281,87 +283,12 @@ func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit
 	}
 }
 
-// deepCopyValue 递归拷贝容器类型(map/slice/pointer/interface 内动态值/struct/
-// 数组)。struct 不能走 Go 值语义直接拷贝——那对引用型字段是**浅**拷贝
-// （core#84：overwrite 指针解引用后仍与 src 共享底层 map/slice），须逐字段
-// 递归；数组同理（元素是 struct 时整体赋值仍共享）。仅用于 OverlayMerge 的
-// 合并路径(config 合并是低频操作,开销可忽略)。
-//
-// 指针环安全（core#102）：#84 深拷贝修复把浅 Set 换成无环检测的递归拷贝，
-// src 出现指针环（自引用/互引 struct）时无限递归 → fatal error: stack
-// overflow 崩进程。现按**指针身份**记忆已拷贝节点——环上第二次访问直接
-// 返回已拷贝节点，终止递归；环内结构共享关系原样保留（src 里两个指针指向
-// 同一块，拷贝后仍指向同一块）。环必须经指针闭合（Go 无值环），指针分支
-// 「先注册新节点、再下探内容」即可兜住全部环形态。
+// deepCopyValue 是本包合并路径的深拷贝入口，实现**单源在
+// pkg/reflectx.DeepCopyValue**（core#130 治本）：core#102 指针环防护
+// （visited 按指针身份记忆、先注册再下探）与 core#84 的 struct 强语义
+// （先整块值拷贝保未导出字段、可 Set 的引用型字段逐一递归替换）随实现
+// 单源；pkg/pagination 的页快照（core#130 pkg 侧）消费同一份实现。
+// config 合并是低频操作，反射开销可忽略。
 func deepCopyValue(v reflect.Value) reflect.Value {
-	return deepCopyVisited(v, map[uintptr]reflect.Value{})
-}
-
-// deepCopyVisited 是 deepCopyValue 的递归体；visited 键为 src 指针地址
-// （拷贝期间 src 不被分配/移动，地址即身份），值为对应的新拷贝。
-func deepCopyVisited(v reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
-	if !v.IsValid() {
-		return v
-	}
-	switch v.Kind() {
-	case reflect.Map:
-		if v.IsNil() {
-			return v
-		}
-		out := reflect.MakeMapWithSize(v.Type(), v.Len())
-		iter := v.MapRange()
-		for iter.Next() {
-			out.SetMapIndex(deepCopyVisited(iter.Key(), visited), deepCopyVisited(iter.Value(), visited))
-		}
-		return out
-	case reflect.Slice:
-		if v.IsNil() {
-			return v
-		}
-		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
-		for i := 0; i < v.Len(); i++ {
-			out.Index(i).Set(deepCopyVisited(v.Index(i), visited))
-		}
-		return out
-	case reflect.Array:
-		out := reflect.New(v.Type()).Elem()
-		for i := 0; i < v.Len(); i++ {
-			out.Index(i).Set(deepCopyVisited(v.Index(i), visited))
-		}
-		return out
-	case reflect.Struct:
-		// 先整块值拷贝（保住未导出字段——reflect 无法 Set 它们），再把
-		// 可 Set 的引用型字段逐一替换成深拷贝；标量字段递归返回原值，
-		// 等价不动。
-		out := reflect.New(v.Type()).Elem()
-		out.Set(v)
-		for i := 0; i < out.NumField(); i++ {
-			f := out.Field(i)
-			if !f.CanSet() {
-				continue
-			}
-			f.Set(deepCopyVisited(v.Field(i), visited))
-		}
-		return out
-	case reflect.Pointer:
-		if v.IsNil() {
-			return v
-		}
-		if out, ok := visited[v.Pointer()]; ok {
-			return out // 环闭合（core#102）：返回已拷贝节点，结构共享
-		}
-		out := reflect.New(v.Type().Elem())
-		visited[v.Pointer()] = out // 先注册再下探：自引用环在此终止
-		out.Elem().Set(deepCopyVisited(v.Elem(), visited))
-		return out
-	case reflect.Interface:
-		if v.IsNil() {
-			return v
-		}
-		// 拷贝动态值,避免接口内隐藏的 map/slice 别名(concrete 值对
-		// 接口字段可赋值)
-		return deepCopyVisited(v.Elem(), visited)
-	default:
-		return v
-	}
+	return reflectx.DeepCopyValue(v)
 }

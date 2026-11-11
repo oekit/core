@@ -6,47 +6,27 @@ import (
 	"net"
 	"os"
 	"strings"
-)
 
-// ipv6SpecialCIDRs 是 IANA「IPv6 Special-Purpose Address Registry」里的
-// 特殊用途段（core#73）：它们不是普通全球单播，不该被 IsPublicIP 当公网放行。
-// 口径对齐同生态 pkg/urlguard 的 blockedCIDRs——出站目标判定（urlguard）拒的段，
-// 「是否公网」判定（IsPublicIP）同样拒。清单固定在编译期，不在运行期增删。
-var ipv6SpecialCIDRs = []*net.IPNet{
-	{IP: net.ParseIP("::"), Mask: net.CIDRMask(96, 128)},          // IPv4-compatible ::/96（RFC 4291 已废止；::127.0.0.1 这类写法 To4() 返 nil，绕过回环门禁）
-	{IP: net.ParseIP("64:ff9b::"), Mask: net.CIDRMask(96, 128)},   // NAT64 well-known 64:ff9b::/96（RFC 6052；可内嵌 IPv4，含 127.0.0.1）
-	{IP: net.ParseIP("64:ff9b:1::"), Mask: net.CIDRMask(48, 128)}, // NAT64 local-use 64:ff9b:1::/48（RFC 8215）
-	{IP: net.ParseIP("100::"), Mask: net.CIDRMask(64, 128)},       // discard-only 100::/64（RFC 6666）
-	{IP: net.ParseIP("100:0:0:1::"), Mask: net.CIDRMask(64, 128)}, // dummy 100:0:0:1::/64（RFC 9780）
-	{IP: net.ParseIP("2001::"), Mask: net.CIDRMask(32, 128)},      // Teredo 2001::/32（RFC 4380）
-	{IP: net.ParseIP("2001:2::"), Mask: net.CIDRMask(48, 128)},    // benchmarking 2001:2::/48（RFC 5180）
-	{IP: net.ParseIP("2001:10::"), Mask: net.CIDRMask(28, 128)},   // ORCHID 2001:10::/28（已废止）
-	{IP: net.ParseIP("2001:20::"), Mask: net.CIDRMask(28, 128)},   // ORCHIDv2 2001:20::/28（RFC 7343）
-	{IP: net.ParseIP("2001:db8::"), Mask: net.CIDRMask(32, 128)},  // 文档段 2001:db8::/32（RFC 3849，IPv6 侧的 TEST-NET）
-	{IP: net.ParseIP("2002::"), Mask: net.CIDRMask(16, 128)},      // 6to4 2002::/16（RFC 3056；可内嵌任意 IPv4）
-	{IP: net.ParseIP("3fff::"), Mask: net.CIDRMask(20, 128)},      // 文档段 3fff::/20（RFC 9637）
-	{IP: net.ParseIP("5f00::"), Mask: net.CIDRMask(16, 128)},      // SRv6 SID 5f00::/16（RFC 9602）
-	{IP: net.ParseIP("fec0::"), Mask: net.CIDRMask(10, 128)},      // site-local fec0::/10（RFC 3879 已废止，存量内网仍在用；IsPrivate 只覆盖 fc00::/7、IsLinkLocalUnicast 只覆盖 fe80::/10，都拦不到它）
-}
+	"github.com/oekit/pkg/urlguard"
+)
 
 // IsPublicIP 判断 IP 是否是公网（全球可路由单播）IP。
 //
-// 判定统一走 net.IP 的标准方法，不做字符串前缀匹配：
+// 判定统一走 net.IP 的标准方法 + pkg/urlguard 的特殊段清单，不做字符串
+// 前缀匹配：
 //   - 两族通用拒绝：loopback、link-local、组播（IsMulticast 覆盖 IPv4 224/4
 //     与 IPv6 ff00::/8，含链路本地组播）、未指定地址、私网（IsPrivate：10/8、
 //     172.16/12、192.168/16 及 IPv6 ULA fc00::/7）；
-//   - IPv4 额外拒绝特殊用途段：0.0.0.0/8（RFC 1122 "this network"，
-//     core#98——IsUnspecified 只覆盖 0.0.0.0 单个地址）、CGNAT 100.64/10、
-//     192.0.0.0/24、基准测试段 198.18/15、TEST-NET 192.0.2.0/24 /
-//     198.51.100.0/24 / 203.0.113.0/24、保留段 240/4（含广播
-//     255.255.255.255）；
-//   - IPv6 额外拒绝 IANA 特殊用途段（见 ipv6SpecialCIDRs）：文档段
-//     2001:db8::/32 与 3fff::/20、discard-only 100::/64、dummy
-//     100:0:0:1::/64、benchmarking 2001:2::/48、ORCHID 2001:10::/28 与
-//     2001:20::/28、Teredo 2001::/32、6to4 2002::/16、NAT64 64:ff9b::/96
-//     与 64:ff9b:1::/48、SRv6 5f00::/16、site-local fec0::/10（RFC 3879
-//     已废止，core#98）、IPv4-compatible ::/96——此前 To4() 对 IPv6 返
-//     nil，整个 IPv6 绕过段判定直接放行（core#73）；
+//   - **特殊用途段判定单源在 pkg/urlguard.IsBlockedIP**（core#132 治本）：
+//     IANA 特殊段知识（IPv4 的 0.0.0.0/8、CGNAT 100.64/10、192.0.0.0/24、
+//     基准测试 198.18/15、TEST-NET 三段、保留段 240/4；IPv6 的 IPv4-compatible
+//     ::/96、NAT64 64:ff9b::/96 与 64:ff9b:1::/48、discard-only 100::/64、
+//     dummy 100:0:0:1::/64、Teredo、benchmarking、ORCHID/ORCHIDv2、文档段
+//     2001:db8::/32 与 3fff::/20、6to4 2002::/16、SRv6 5f00::/16、site-local
+//     fec0::/10）此前在本包以「ipv6SpecialCIDRs 列表 + IPv4 字节级 switch」
+//     形态自持一份、与 urlguard 的 blockedCIDRs 靠注释手工对账（#297 加段
+//     就是三处联动），现删除本地清单改引 urlguard——出站目标判定（urlguard）
+//     拒的段，「是否公网」判定同样拒，加段只改 pkg 一处；
 //   - 其余 IPv4 与 **IPv6 全球单播地址**（如 2606:4700::1）返回 true——
 //     此前实现所有 IPv6 一律 false（core#53）。
 func IsPublicIP(ip net.IP) bool {
@@ -57,36 +37,10 @@ func IsPublicIP(ip net.IP) bool {
 		ip.IsUnspecified() || ip.IsPrivate() {
 		return false
 	}
-	if ip4 := ip.To4(); ip4 != nil {
-		switch {
-		case ip4[0] == 0: // "this network" 0.0.0.0/8（RFC 1122；IsUnspecified 只覆盖 0.0.0.0 本身，0.1.2.3 这类同段非零地址要靠这里拦，core#98）
-			return false
-		case ip4[0] == 100 && ip4[1]&0xC0 == 64: // CGNAT 100.64.0.0/10
-			return false
-		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0: // 192.0.0.0/24
-			return false
-		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 2: // TEST-NET-1 192.0.2.0/24
-			return false
-		case ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19): // 基准测试段 198.18.0.0/15
-			return false
-		case ip4[0] == 198 && ip4[1] == 51 && ip4[2] == 100: // TEST-NET-2 198.51.100.0/24
-			return false
-		case ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113: // TEST-NET-3 203.0.113.0/24
-			return false
-		case ip4[0]&0xF0 == 0xF0: // 保留段 240.0.0.0/4（含 255.255.255.255）
-			return false
-		}
-	} else {
-		// To4() == nil 的纯 IPv6：过 IANA 特殊用途段清单，命中即非公网。
-		// 注意 To4() 只认 ::ffff: 映射形式，::127.0.0.1 这类 IPv4-compatible
-		// 写法会走到这里，由 ::/96 段拦下。
-		for _, cidr := range ipv6SpecialCIDRs {
-			if cidr.Contains(ip) {
-				return false
-			}
-		}
-	}
-	return true
+	// net.IP 标准方法未覆盖的特殊段（core#98 的 0.0.0.0/8、fec0::/10，
+	// core#73 的 ::/96 等）全在 urlguard 的缺省阻断清单里；v4-mapped 写法
+	// （::ffff:127.0.0.1）由 stdlib 方法与 urlguard 的 To4 归一化同判。
+	return !urlguard.IsBlockedIP(ip)
 }
 
 // IsIPv4 判断是否是 IPv4 地址。
@@ -94,25 +48,42 @@ func IsIPv4(ip net.IP) bool {
 	return ip.To4() != nil
 }
 
-// GetLanIPs 获取局域网本地 IP 地址列表。
-func GetLanIPs() ([]string, error) {
+// collectInterfaceIPs 一次 net.InterfaceAddrs 取址并摘出 IP（core#134 单源）：
+// GetLanIPs / ServerIPString / ServerIP / GetLocalIP 的过滤谓词各不相同，
+// 「遍历 addrs → 断言 *net.IPNet → 取 IP」的循环此前复制四份；现收敛到这
+// 一个取址点，各函数变为谓词 + 归约（纯函数谓词可用注入 IP 列表驱动测试，
+// classifyServerIP 先例）。调用方共享同一 []net.IP 切片（只读，不修改元素）。
+func collectInterfaceIPs() ([]net.IP, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return nil, err
 	}
-
-	var ips []string
+	ips := make([]net.IP, 0, len(addrs))
 	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok &&
-			!ipnet.IP.IsLoopback() &&
-			!ipnet.IP.IsLinkLocalMulticast() &&
-			!ipnet.IP.IsLinkLocalUnicast() &&
-			IsIPv4(ipnet.IP) &&
-			!IsPublicIP(ipnet.IP) {
-			ips = append(ips, ipnet.IP.String())
+		if ipnet, ok := address.(*net.IPNet); ok {
+			ips = append(ips, ipnet.IP)
 		}
 	}
 	return ips, nil
+}
+
+// GetLanIPs 获取局域网本地 IP 地址列表。
+func GetLanIPs() ([]string, error) {
+	ips, err := collectInterfaceIPs()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, ip := range ips {
+		if !ip.IsLoopback() &&
+			!ip.IsLinkLocalMulticast() &&
+			!ip.IsLinkLocalUnicast() &&
+			IsIPv4(ip) &&
+			!IsPublicIP(ip) {
+			out = append(out, ip.String())
+		}
+	}
+	return out, nil
 }
 
 // HostName 返回主机名。
@@ -123,20 +94,17 @@ func HostName() string {
 
 // ServerIPString 返回所有服务器 IP 的逗号分隔字符串。
 func ServerIPString() string {
-	addrs, err := net.InterfaceAddrs()
+	ips, err := collectInterfaceIPs()
 	if err != nil {
 		return ""
 	}
-
-	var ips []string
-	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				ips = append(ips, ipnet.IP.String())
-			}
+	var out []string
+	for _, ip := range ips {
+		if !ip.IsLoopback() && IsIPv4(ip) {
+			out = append(out, ip.String())
 		}
 	}
-	return strings.Join(ips, ",")
+	return strings.Join(out, ",")
 }
 
 // ServerIP 返回服务器的外网 IP 和内网 IP。
@@ -147,16 +115,9 @@ func ServerIPString() string {
 // （core#54）。现统一走 net.IP 标准方法（见 classifyServerIP），
 // IPv4 与 IPv6 同一条判定线。
 func ServerIP() (externalIP, internalIP string) {
-	addrs, err := net.InterfaceAddrs()
+	ips, err := collectInterfaceIPs()
 	if err != nil {
 		return "", ""
-	}
-
-	ips := make([]net.IP, 0, len(addrs))
-	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok {
-			ips = append(ips, ipnet.IP)
-		}
 	}
 	return classifyServerIP(ips)
 }
@@ -220,13 +181,13 @@ func GetLocalIP() (string, error) {
 		slog.Warn("network: POD_IP 不是合法的非回环 IPv4，忽略并回退网卡探测",
 			"component", "network.podip", "pod_ip", ip)
 	}
-	addrs, err := net.InterfaceAddrs()
+	ips, err := collectInterfaceIPs()
 	if err != nil {
 		return "", err
 	}
-	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-			return ipNet.IP.String(), nil
+	for _, ip := range ips {
+		if !ip.IsLoopback() && ip.To4() != nil {
+			return ip.String(), nil
 		}
 	}
 	return "", errNoLocalIP

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // defaultLogger 是 Manager 未注入 WithLogger 时的内部日志出口。
@@ -307,10 +309,16 @@ func pendingBatch[T any](mu *sync.Mutex, src *[]T, done *int) []T {
 
 // runFunc 执行无参清理函数并隔离 panic：panic 会跳过剩余清理任务，
 // 且 sync.Once 视其为已完成，导致后续 Shutdown 静默 no-op。
+//
+// panic 值收编单源走 pkg/errors.Recovered（core#136）：panic 值本身是
+// error 时身份不丢（Unwrap 透传，errors.Is/As 可直达业务侧 panic 出去的
+// 原始错误——closer 以 panic(err) 失败是常见写法，此前 %v 拍平后部署
+// 门禁/审计无法定位原始错误类）；文本形态从 "panicked: %v" 变为
+// "panic: %T: %v"（*PanicError.Error()，panic 值类型信息恒在场）。
 func runFunc(name string, fn func()) (err error) {
 	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%s: panicked: %v", name, r)
+		if perr := pkgerrors.Recovered(recover()); perr != nil {
+			err = fmt.Errorf("%s: %w", name, perr)
 		}
 	}()
 	fn()
@@ -318,10 +326,11 @@ func runFunc(name string, fn func()) (err error) {
 }
 
 // runCloser 执行单个 closer 任务：独立超时预算 + 父 context 取消传播 + panic 隔离。
+// panic 收编同 runFunc（pkg/errors.Recovered 单源，core#136）。
 func (m *Manager) runCloser(j job, parent context.Context) (err error) {
 	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%s: panicked: %v", j.name, r)
+		if perr := pkgerrors.Recovered(recover()); perr != nil {
+			err = fmt.Errorf("%s: %w", j.name, perr)
 		}
 	}()
 

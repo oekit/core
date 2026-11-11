@@ -2,9 +2,12 @@ package config
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // ConfigSource 是配置源接口。
@@ -25,10 +28,11 @@ type ConfigWatcher[T any] struct {
 	parser   func([]byte) (*T, error)
 	onChange func(old, new *T)
 	mu       sync.Mutex
-	// dispatchMu 串行化 Reload 的 Swap+回调投递：并发 Reload（手动触发与
+	// dispatchMu 串行化 Reload 的 Swap+回调**入队**：并发 Reload（手动触发与
 	// Watch 回调同时到）曾可能乱序投递，消费方把旧配置当最新应用。
 	// Read+parse 仍在此锁之外（慢读不阻塞别的重载），读取次序由 readSeq
-	// 代号裁决——见 Reload。
+	// 代号裁决——见 Reload。**用户回调不在此锁内执行**（core#137：回调
+	// 队列化到独立 dispatch goroutine，锁内只做 Swap 与入队两件快事）。
 	dispatchMu sync.Mutex
 	// readSeq 给每次 Read 完成的读取发一个单调递增的代号。解析完成后
 	// Swap 前比对代号：落后于已应用代号的迟到结果直接丢弃——先发起的
@@ -38,6 +42,28 @@ type ConfigWatcher[T any] struct {
 	readSeq    atomic.Int64
 	appliedSeq int64 // dispatchMu 保护：已应用的最大代号
 	loggerV    atomic.Pointer[slog.Logger]
+
+	// 回调投递队列（core#137）：入队在 dispatchMu 内（入队序 = Swap 序 ⇒
+	// 投递保序），执行在单独的 dispatch goroutine（pendingOnce 惰性启动，
+	// 与 watcher 同生命周期）——用户回调永不持锁执行：
+	//   - onChange 内再调 Reload（同 goroutine 重入）不再死锁——Reload 的
+	//     锁都归得回来，回调只是再入队；
+	//   - onChange 同步等待另一 goroutine 的 Reload 完成，同样不再死锁；
+	//   - 慢回调不再卡住 Watch 通道的后续重载投递（只排队，不阻塞 Swap）。
+	pendingMu   sync.Mutex
+	pendingCond *sync.Cond
+	pending     []pendingChange[T]
+	pendingOnce sync.Once
+	// dispatchRunning 在 dispatchLoop 启动瞬间置位（懒启动的观测点，测试用）。
+	dispatchRunning atomic.Bool
+}
+
+// pendingChange 是一次待投递的回调：fn 在**入队时**捕获——OnChange 换了
+// 新回调后，旧回调不会收到它注册之后才入队的事件之外的事件（投递时再读
+// w.onChange 会让新回调收到注册前的旧事件，语义反而更差）。
+type pendingChange[T any] struct {
+	fn      func(old, new *T)
+	old, nw *T
 }
 
 // logger 返回当前 logger(atomic 加载)。
@@ -53,6 +79,7 @@ func NewConfigWatcher[T any](source ConfigSource, parser func([]byte) (*T, error
 		source: source,
 		parser: parser,
 	}
+	w.pendingCond = sync.NewCond(&w.pendingMu)
 	w.loggerV.Store(slog.Default().With("component", "config-watcher"))
 	return w
 }
@@ -90,6 +117,16 @@ func (w *ConfigWatcher[T]) Start(ctx context.Context) error {
 }
 
 // OnChange 注册配置变更回调。
+//
+// 回调在**独立的 dispatch goroutine 上串行执行**（core#137 队列化投递）：
+// 同一 watcher 的回调按重载应用的次序（Swap 序）逐个投递，永不并发、永不
+// 持 watcher 内部锁执行——回调里再调 Reload（含经别的 goroutine 间接等待
+// Reload 完成）不会死锁；慢回调不阻塞后续重载的 Swap（Get 立即可见新值，
+// 回调随后送达）。回调自身 panic 被隔离为 ERROR 日志，dispatch 循环存续
+// （历史行为是 panic 直接打死调用方 goroutine 所在的进程面）。
+//
+// 首次有回调可投递时才启动 dispatch goroutine；它与 watcher 同生命周期
+// （watcher 无 Close 语义，与既有行为一致）。
 func (w *ConfigWatcher[T]) OnChange(fn func(old, new *T)) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -97,10 +134,13 @@ func (w *ConfigWatcher[T]) OnChange(fn func(old, new *T)) {
 }
 
 // Reload 手动触发配置重载。
-// Swap 与 onChange 回调整体串行化；读取次序按 Read 完成时刻的代号裁决——
-// 代号落后的迟到结果（解析慢的重载）被丢弃，**最新读到的配置**最终胜出，
-// 不会出现「先发起的重载后完成 Swap，把新配置盖回旧值」（core#81）。
-// 注意 onChange 内不得再调用 Reload（同 goroutine 重入会死锁）。
+// 读取次序按 Read 完成时刻的代号裁决——代号落后的迟到结果（解析慢的重载）
+// 被丢弃，**最新读到的配置**最终胜出，不会出现「先发起的重载后完成 Swap，
+// 把新配置盖回旧值」（core#81）。
+//
+// 返回时 Swap 已完成（Get 可见新值）；onChange 回调经队列在独立 dispatch
+// goroutine 上随后按序投递（core#137）——回调不再在 Reload 的调用栈上同步
+// 执行，也不在 watcher 内部锁内执行。
 func (w *ConfigWatcher[T]) Reload() error {
 	data, err := w.source.Read()
 	if err != nil {
@@ -118,26 +158,69 @@ func (w *ConfigWatcher[T]) Reload() error {
 	}
 
 	w.dispatchMu.Lock()
-	defer w.dispatchMu.Unlock()
 
 	// 代次校验：解析期间已有更新（代号更大）的重载应用过 ⇒ 本次读到的是
 	// 旧内容，Swap 只会把旧值盖到新值之上。丢弃（返回 nil——重载这件事
 	// 已经由代号更新的那次完成，迟到方没有可报告的失败）。
 	if seq < w.appliedSeq {
+		w.dispatchMu.Unlock()
 		return nil
 	}
 	w.appliedSeq = seq
 
 	oldCfg := w.current.Swap(newCfg)
 
-	// 触发回调
+	// 回调入队（仍在 dispatchMu 内 ⇒ 入队序 = Swap 序 ⇒ 投递保序），
+	// 执行在 dispatch goroutine 上（锁外）——core#137。
+	var fn func(old, new *T)
 	w.mu.Lock()
-	onChange := w.onChange
+	fn = w.onChange
 	w.mu.Unlock()
-
-	if onChange != nil && oldCfg != nil {
-		onChange(oldCfg, newCfg)
+	if fn != nil && oldCfg != nil {
+		w.pendingMu.Lock()
+		w.pending = append(w.pending, pendingChange[T]{fn: fn, old: oldCfg, nw: newCfg})
+		w.pendingMu.Unlock()
+		w.pendingCond.Signal()
+		w.pendingOnce.Do(func() { go w.dispatchLoop() })
 	}
 
+	w.dispatchMu.Unlock()
 	return nil
+}
+
+// dispatchLoop 是回调投递的专职 goroutine：从队列逐条取出（FIFO），
+// 在**不持有任何 watcher 锁**的状态下执行用户回调；回调 panic 就地收编
+// 为 ERROR 日志（pkg/errors.Recovered，core#136 同一单源），循环存续——
+// 一次回调失控不能永久哑掉后续所有配置变更通知。
+func (w *ConfigWatcher[T]) dispatchLoop() {
+	w.dispatchRunning.Store(true)
+	for {
+		w.pendingMu.Lock()
+		for len(w.pending) == 0 {
+			w.pendingCond.Wait()
+		}
+		item := w.pending[0]
+		w.pending = w.pending[1:]
+		w.pendingMu.Unlock()
+
+		w.deliver(item)
+	}
+}
+
+// deliver 执行单条回调，panic 收编为日志。
+func (w *ConfigWatcher[T]) deliver(item pendingChange[T]) {
+	defer func() {
+		perr := pkgerrors.Recovered(recover())
+		if perr == nil {
+			return
+		}
+		stack := ""
+		var pe *pkgerrors.PanicError
+		if errors.As(perr, &pe) {
+			stack = string(pe.Stack)
+		}
+		w.logger().Error("config onChange panicked (isolated by dispatch loop)",
+			"err", perr.Error(), "stack", stack)
+	}()
+	item.fn(item.old, item.nw)
 }

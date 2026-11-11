@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -60,6 +60,9 @@ type LoadOption func(*loadOptions)
 
 type loadOptions struct {
 	strict bool
+	// skipUnmarshaler 严格模式对自带 UnmarshalYAML 的类型整段跳过（#127，
+	// WithSkipUnmarshaler）——见 WithSkipUnmarshaler 的说明。
+	skipUnmarshaler bool
 	// envNaming env 命名策略（前缀 / 逐字段覆盖）——见 envnaming.go。
 	envNaming EnvNaming
 	// trimEnvStrings ApplyEnv 写字符串字段前裁剪 env 值首尾空白（#104，
@@ -80,8 +83,40 @@ type loadOptions struct {
 // YAML merge key（`<<` 锚点合并，#47）是规范内的合法语法，不拦；merge 内容
 // 按**本层类型**继续校验——展开后的未知键照样拒载。锚点挂在未知键上（如
 // `_base: &base ...` 的顶层草稿键）仍按未知键拒载——那是真未知键，不是语法。
+//
+// 配置树里有自带 UnmarshalYAML 专门校验的类型时，可叠加 WithSkipUnmarshaler
+// 让通用递归不进入该类型（#127）——避免宿主的专门裁决被通用文案降级。
 func WithStrict() LoadOption {
 	return func(o *loadOptions) { o.strict = true }
+}
+
+// WithSkipUnmarshaler 严格模式下，对**自带 yaml.Unmarshaler 的类型**整段跳过
+// 通用递归校验（#127）。
+//
+// 为什么需要：宿主配置树里常有「自带严格校验的类型」（UnmarshalYAML 里有
+// 自己的专门校验与专门裁决错误信息）。缺省时通用递归照样钻进去按 struct
+// 字段校验其 YAML 内容，产生两重问题：
+//
+//   - **专门裁决被降级**：宿主写 `mcp.servers.x.unknow_key`，上游通用校验
+//     先拦，报出的是「未知配置键 unknow_key（合法键: …）」的通用文案，而
+//     宿主的 UnmarshalYAML 本可给出带域语义的裁决文本——运维失去专门判读
+//     信息；
+//   - **两条判定面**：宿主的 UnmarshalYAML 里有自己的递归边界（动态 map 键、
+//     merge key 等）时，通用递归的边界与宿主不一致——同一份配置两套判法。
+//
+// 开启后：`reflect.PointerTo(t).Implements(yaml.Unmarshaler)`（含值接收者
+// 形态）命中的子树，严格检查直接放行——yaml.v3 解码本就会把该子树交给它
+// 的 UnmarshalYAML，宿主的专门校验成为唯一判定面（这正是解码语义：严格
+// 校验不该比解码器更深入）。
+//
+// 与 WithStrict 组合使用（单独使用无意义）；根类型自身实现 Unmarshaler 时
+// 整棵树跳过——整份配置都由宿主的 UnmarshalYAML 裁决。
+//
+// 注意：跳过的只是**通用键校验**，yaml.v3 解码仍会调用该类型的
+// UnmarshalYAML——宿主的专门校验错误照常拒载。默认（不传本选项）保持
+// 历史行为：通用递归照样进入。
+func WithSkipUnmarshaler() LoadOption {
+	return func(o *loadOptions) { o.skipUnmarshaler = true }
 }
 
 func newLoadOptions(opts []LoadOption) loadOptions {
@@ -98,11 +133,24 @@ func newLoadOptions(opts []LoadOption) loadOptions {
 // 先检查是为了让错误信息指向「键」而不是解码器内部的类型名。
 func unmarshalConfig(data []byte, out any, opts loadOptions) error {
 	if opts.strict {
-		if err := checkUnknownKeys(data, out); err != nil {
+		if err := checkUnknownKeys(data, out, opts); err != nil {
 			return err
 		}
 	}
 	return yaml.Unmarshal(data, out)
+}
+
+// yamlUnmarshalerType 是 yaml.v3 的 Unmarshaler 接口类型（#127 的跳过判定
+// 用）。yaml.v3 解码时对「类型或 *类型实现本接口」的节点调用其
+// UnmarshalYAML——严格校验的跳过判定与解码器同口径。
+var yamlUnmarshalerType = reflect.TypeFor[yaml.Unmarshaler]()
+
+// implementsYAMLUnmarshaler 报告 t（或 *t）是否自带 yaml.Unmarshaler。
+func implementsYAMLUnmarshaler(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+	return t.Implements(yamlUnmarshalerType) || reflect.PointerTo(t).Implements(yamlUnmarshalerType)
 }
 
 // fieldInfo 一个可被 YAML 键命中的字段。
@@ -181,7 +229,9 @@ func yamlFields(t reflect.Type, prefix []int) (fields map[string]fieldInfo, inli
 }
 
 // checkUnknownKeys 解析 YAML 并沿结构体类型下降，找出第一个未知键。
-func checkUnknownKeys(data []byte, out any) error {
+// opts 携带 WithSkipUnmarshaler（#127）：开启时对自带 UnmarshalYAML 的类型
+// 整段跳过。
+func checkUnknownKeys(data []byte, out any, opts loadOptions) error {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return nil
 	}
@@ -202,12 +252,18 @@ func checkUnknownKeys(data []byte, out any) error {
 	if rv.Kind() != reflect.Struct {
 		return nil
 	}
-	return walkStrict(&node, rv.Type(), "")
+	return walkStrict(&node, rv.Type(), "", opts)
 }
 
 // walkStrict 沿 node 与类型同步下降；path 是 YAML 键形式的嵌套路径。
-func walkStrict(node *yaml.Node, t reflect.Type, path string) error {
+func walkStrict(node *yaml.Node, t reflect.Type, path string, opts loadOptions) error {
 	if node == nil {
+		return nil
+	}
+	// #127 WithSkipUnmarshaler：自带 UnmarshalYAML 的类型由 yaml.v3 解码时
+	// 交给它的专门校验，通用递归不再双判（宿主的专门裁决文本因此不被本层
+	// 的通用文案抢先降级）。
+	if opts.skipUnmarshaler && implementsYAMLUnmarshaler(t) {
 		return nil
 	}
 	switch node.Kind {
@@ -215,11 +271,11 @@ func walkStrict(node *yaml.Node, t reflect.Type, path string) error {
 		if len(node.Content) == 0 {
 			return nil
 		}
-		return walkStrict(node.Content[0], t, path)
+		return walkStrict(node.Content[0], t, path, opts)
 	case yaml.AliasNode:
-		return walkStrict(node.Alias, t, path)
+		return walkStrict(node.Alias, t, path, opts)
 	case yaml.MappingNode:
-		return walkStrictMapping(node, t, path)
+		return walkStrictMapping(node, t, path, opts)
 	case yaml.SequenceNode:
 		// 切片元素：路径不带键（元素无稳定名），逐个按元素类型检查
 		et := t
@@ -229,9 +285,8 @@ func walkStrict(node *yaml.Node, t reflect.Type, path string) error {
 		if et.Kind() != reflect.Slice && et.Kind() != reflect.Array {
 			return nil
 		}
-		for i, child := range node.Content {
-			_ = i
-			if err := walkStrict(child, et.Elem(), path); err != nil {
+		for _, child := range node.Content {
+			if err := walkStrict(child, et.Elem(), path, opts); err != nil {
 				return err
 			}
 		}
@@ -241,7 +296,7 @@ func walkStrict(node *yaml.Node, t reflect.Type, path string) error {
 	}
 }
 
-func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
+func walkStrictMapping(node *yaml.Node, t reflect.Type, path string, opts loadOptions) error {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -252,7 +307,7 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 		for k := range fields {
 			legal = append(legal, k)
 		}
-		sort.Strings(legal)
+		slices.Sort(legal)
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			key := node.Content[i]
 			val := node.Content[i+1]
@@ -264,7 +319,7 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 			// 内容并入当前层」，故其值按**本层类型**继续校验：merge 展开后的
 			// 未知键依然逃不过严格模式（比「整段跳过」的放行更严丝合缝）。
 			if key.Value == "<<" {
-				if err := walkStrictMergeValue(val, t, path); err != nil {
+				if err := walkStrictMergeValue(val, t, path, opts); err != nil {
 					return err
 				}
 				continue
@@ -276,7 +331,7 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 				// 与实现正好相反的那口锅）。值按 map 元素类型继续下降校验：
 				// 元素是结构体时其内部未知键照样逃不过严格模式。
 				if inlineMap != nil {
-					if err := walkStrict(val, inlineMap.Elem(), joinPath(path, key.Value)); err != nil {
+					if err := walkStrict(val, inlineMap.Elem(), joinPath(path, key.Value), opts); err != nil {
 						return err
 					}
 					continue
@@ -289,7 +344,7 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 				}
 			}
 			ft := fieldTypeAt(t, info.index)
-			if err := walkStrict(val, ft, joinPath(path, key.Value)); err != nil {
+			if err := walkStrict(val, ft, joinPath(path, key.Value), opts); err != nil {
 				return err
 			}
 		}
@@ -298,7 +353,7 @@ func walkStrictMapping(node *yaml.Node, t reflect.Type, path string) error {
 		// map 的键由调用方定义，任意键都合法——但值若是结构体，仍要查其内部
 		et := t.Elem()
 		for i := 0; i+1 < len(node.Content); i += 2 {
-			if err := walkStrict(node.Content[i+1], et, path); err != nil {
+			if err := walkStrict(node.Content[i+1], et, path, opts); err != nil {
 				return err
 			}
 		}
@@ -319,16 +374,16 @@ func joinPath(path, key string) string {
 // 单映射（含锚点别名，walkStrict 的 AliasNode 分支自动解引）与映射序列
 // （多锚点按序合并）。其余形态（非法配置）交回 walkStrict 按默认分支放行，
 // 由后续 yaml.v3 解码给出语法层错误。
-func walkStrictMergeValue(val *yaml.Node, t reflect.Type, path string) error {
+func walkStrictMergeValue(val *yaml.Node, t reflect.Type, path string, opts loadOptions) error {
 	if val.Kind == yaml.SequenceNode {
 		for _, child := range val.Content {
-			if err := walkStrict(child, t, path); err != nil {
+			if err := walkStrict(child, t, path, opts); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return walkStrict(val, t, path)
+	return walkStrict(val, t, path, opts)
 }
 
 func fieldTypeAt(t reflect.Type, index []int) reflect.Type {
@@ -379,19 +434,9 @@ func editDistance(a, b string) int {
 			if ar[i-1] == br[j-1] {
 				cost = 0
 			}
-			cur[j] = minInt(cur[j-1]+1, prev[j]+1, prev[j-1]+cost)
+			cur[j] = min(cur[j-1]+1, prev[j]+1, prev[j-1]+cost)
 		}
 		prev, cur = cur, prev
 	}
 	return prev[len(br)]
-}
-
-func minInt(vals ...int) int {
-	m := vals[0]
-	for _, v := range vals[1:] {
-		if v < m {
-			m = v
-		}
-	}
-	return m
 }
