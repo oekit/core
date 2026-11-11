@@ -9,11 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
 
-// durationType 用于识别 time.Duration 字段：Duration 与普通 int64 同 kind，
-// 但取值走 time.ParseDuration 文法（default/env 值与 range 边界皆如此）。
-var durationType = reflect.TypeOf(time.Duration(0))
+	pkgconfig "github.com/oekit/pkg/config"
+)
 
 // targetTagNames 是本包支持的独立结构体 tag 集合（与 yaml/merge tag 互不冲突），
 // 供按需分配深层 *struct 时快速判断"该结构体里有没有值得填充的字段"。
@@ -28,10 +26,13 @@ var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // 优先级约定（与 LoadBootstrap 内 ApplyEnv → FillDefaults 的接线顺序配合）：
 // yaml 显式值 > env tag > default tag。
 //
-// 零值歧义：字段当前的 0/""/false/空切片与"未设置"对反射不可区分。yaml 里
-// 显式写 `port: 0` 时，**不带 FieldSet** 调用本函数会被 default 覆盖（历史行为）；
-// 需要保留显式零值请传入 WithFieldSet（LoadBootstrap / ApplyTagPasses 已默认接线），
-// 或对该字段打 require tag（default 永不填充，必须由 yaml/env 提供）。
+// 零值歧义：字段当前的 0/""/false/nil 切片与"未设置"对反射不可区分
+// （判定走 stdlib reflect.Value.IsZero，core#133；v0.15.0 起**非 nil 空切片**
+// 不再算零值——显式 `field: []` 不会被 default 覆盖、不会被 env 覆盖，退化
+// 校验下也算「已提供」）。yaml 里显式写 `port: 0` 时，**不带 FieldSet** 调用
+// 本函数仍会被 default 覆盖（历史行为）；需要保留显式零值请传入 WithFieldSet
+// （LoadBootstrap / ApplyTagPasses 已默认接线），或对该字段打 require tag
+// （default 永不填充，必须由 yaml/env 提供）。
 // 整份配置都要区分零值时，少量字段用指针类型仍可行；改造成本过高则用
 // FieldSet，而不是全量 *T。
 //
@@ -352,7 +353,7 @@ func fillDefaultField(sf reflect.StructField, fv reflect.Value, path string, set
 	if !ok || def == "" {
 		return nil
 	}
-	if !isZeroValue(fv) {
+	if !fv.IsZero() {
 		return nil // 已有显式值（yaml/env）不覆盖
 	}
 	return setScalarFromString(fv, def, fmt.Sprintf("default %q", def), path)
@@ -382,7 +383,7 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath stri
 	if strings.TrimSpace(raw) == "" {
 		return nil // 判定用裁剪值：显式设为空串/纯空白视同未设置
 	}
-	if !isZeroValue(fv) {
+	if !fv.IsZero() {
 		return nil // yaml 显式值优先
 	}
 	// 写入用**原始值**（core#88）：字符串字段保留首尾空白——口令/token/
@@ -445,38 +446,52 @@ func validateTagFields(sf reflect.StructField, fv reflect.Value, path, yamlPath 
 	return nil
 }
 
-// validateEnvNaming 纯静态命名一致性：声明的 env 名应与由 yaml key（缺省字段名）
-// 推导的约定名一致。有意自定义名请打 `ignorederived:"true"`。
+// envNameMismatch 是 env 命名一致性检查的**纯判定内核**（core#131：
+// validateEnvNaming 与 LintEnvNaming 的 walk 闭包此前逐行同构、仅输出
+// 不同——判定收敛到这一份，两个入口只负责格式化输出；命名策略再演进时
+// lint 与硬校验的口径不会再分叉）。
 //
-// 启用命名策略后（见 envnaming.go），约定名口径随之变化：
+// 判定：env tag 声明名与派生约定名不一致即命中（`ignorederived:"true"`
+// 豁免、覆盖表命中豁免、无派生名或已一致不命中）。启用命名策略后约定名
+// 口径随 EnvNaming 变化（见 envnaming.go）：设了前缀时按**路径级**派生名
+// 比对；未启用策略口径与历史一致（叶子键派生名）。
 //
-//   - 覆盖表命中的字段：名字由表决定，**豁免**本检查（表里写的就是最终名）；
-//   - 设了前缀：约定名 = 前缀 + 路径派生名，故检查「去前缀后的 tag」是否等于
-//     路径派生名——tag 是显式声明，与「前缀即约定」的口径一致才算一致；
-//   - 未启用策略：口径与历史完全一致（叶子键派生名）。
-func validateEnvNaming(sf reflect.StructField, path, yamlPath string, addr bool, n EnvNaming) error {
+// 返回 declared（声明名）与 derived（派生名）供输出格式化；mismatched 为
+// false 时二者无意义。
+func envNameMismatch(sf reflect.StructField, yamlPath string, addr bool, n EnvNaming) (declared, derived string, mismatched bool) {
 	name, ok := sf.Tag.Lookup("env")
 	if !ok || name == "" {
-		return nil
+		return "", "", false
 	}
 	if _, skip := sf.Tag.Lookup("ignorederived"); skip {
-		return nil
+		return "", "", false
 	}
 	// 覆盖表命中的字段：最终名由表决定，不参与派生名一致性检查。
 	if addr && n.Overrides != nil {
 		if _, hit := n.Overrides[yamlPath]; hit {
-			return nil
+			return "", "", false
 		}
 	}
-	derived := derivedEnvName(sf)
+	der := derivedEnvName(sf)
 	if n.Prefix != "" && addr {
 		// 前缀策略下的约定名是**路径级**派生名（去前缀后比对）。
-		derived = derivedPathEnvName(yamlPath)
+		der = derivedPathEnvName(yamlPath)
 	}
-	if derived == "" || derived == name {
+	if der == "" || der == name {
+		return "", "", false
+	}
+	return name, der, true
+}
+
+// validateEnvNaming 纯静态命名一致性：声明的 env 名应与由 yaml key（缺省字段名）
+// 推导的约定名一致。有意自定义名请打 `ignorederived:"true"`。判定内核见
+// envNameMismatch（core#131 收敛）。
+func validateEnvNaming(sf reflect.StructField, path, yamlPath string, addr bool, n EnvNaming) error {
+	name, der, mismatched := envNameMismatch(sf, yamlPath, addr, n)
+	if !mismatched {
 		return nil
 	}
-	return fmt.Errorf("field %q: env tag %q differs from derived name %q (intentional? add ignorederived:\"true\")", path, name, derived)
+	return fmt.Errorf("field %q: env tag %q differs from derived name %q (intentional? add ignorederived:\"true\")", path, name, der)
 }
 
 // LintEnvNaming 静态扫描 env tag 与推导约定名不一致的字段，返回诊断行
@@ -484,7 +499,8 @@ func validateEnvNaming(sf reflect.StructField, path, yamlPath string, addr bool,
 // 有意自定义名请打 `ignorederived:"true"`。
 //
 // 可传 WithEnvNaming 启用命名策略口径：覆盖表命中的字段豁免；设了前缀则按
-// **路径级**派生名比对（与运行时实际读的变量名同口径）。
+// **路径级**派生名比对（与运行时实际读的变量名同口径）。判定内核与
+// validateEnvNaming 共用 envNameMismatch（core#131 收敛）。
 func LintEnvNaming(v any, opts ...PassOption) ([]string, error) {
 	rv, err := targetStructValue(v, "LintEnvNaming")
 	if err != nil {
@@ -492,27 +508,11 @@ func LintEnvNaming(v any, opts ...PassOption) ([]string, error) {
 	}
 	n := buildPassConfig(opts).envNaming
 	var out []string
-	walk := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
-		name, ok := sf.Tag.Lookup("env")
-		if !ok || name == "" {
-			return nil
+	walk := func(sf reflect.StructField, _ reflect.Value, path, yamlPath string, addr bool) error {
+		name, der, mismatched := envNameMismatch(sf, yamlPath, addr, n)
+		if mismatched {
+			out = append(out, fmt.Sprintf("field %q: env tag %q differs from derived name %q", path, name, der))
 		}
-		if _, skip := sf.Tag.Lookup("ignorederived"); skip {
-			return nil
-		}
-		if addr && n.Overrides != nil {
-			if _, hit := n.Overrides[yamlPath]; hit {
-				return nil
-			}
-		}
-		derived := derivedEnvName(sf)
-		if addr && n.Prefix != "" {
-			derived = derivedPathEnvName(yamlPath)
-		}
-		if derived == "" || derived == name {
-			return nil
-		}
-		out = append(out, fmt.Sprintf("field %q: env tag %q differs from derived name %q", path, name, derived))
 		return nil
 	}
 	if err := walkTaggedStruct(rv, "", "", true, false, walk); err != nil {
@@ -540,7 +540,7 @@ func validateRequireField(sf reflect.StructField, fv reflect.Value, path string,
 		}
 		return fmt.Errorf("field %q: required but not provided (set %s)", path, source)
 	}
-	if isZeroValue(fv) {
+	if fv.IsZero() {
 		return fmt.Errorf("field %q: required but value is zero (provide via yaml or env before ValidateTags)", path)
 	}
 	return nil
@@ -585,44 +585,19 @@ type envSeenEntry struct {
 
 // setScalarFromString 把字符串 s 按字段类型解析后写入 fv。
 // source 用于错误信息（如 `default "abc"` 或 `env PORT="abc"`）。
+//
+// 标量解析**单源走 pkg/config.SetFromString**（core#129）：与 pkg/config
+// 引擎共享同一份「字符串按 reflect.Kind 解析落位」实现与错误口径，两套
+// 平行实现（含 duration 的类型同一性识别）到此收敛——本包只在 pkg 口径
+// 外包一层 field/source 前缀，错误文案由英文短句统一为 pkg 口径（changelog
+// 已注明的行为面）。[]string 的逗号切分**保留在本包**：丢弃空段是本包
+// tag 文法的成文契约（见 FillDefaults 的支持类型说明），与 pkg 原语的
+// 通用切片语义（保留空段、支持数值元素）有意不同，不属重复实现。
 func setScalarFromString(fv reflect.Value, s, source, path string) error {
+	// 标量值解析前去首尾空白（成文契约）；字符串字段经 ApplyEnv 的旁路
+	// （写原始值，core#88）不走本函数，FillDefaults 的字符串默认值在此裁剪。
 	s = strings.TrimSpace(s)
-	if fv.Type() == durationType {
-		d, err := time.ParseDuration(s)
-		if err != nil {
-			return fmt.Errorf("field %q: %s is not a valid duration: %w", path, source, err)
-		}
-		fv.SetInt(int64(d))
-		return nil
-	}
-	switch fv.Kind() {
-	case reflect.String:
-		fv.SetString(s)
-	case reflect.Bool:
-		b, err := strconv.ParseBool(s)
-		if err != nil {
-			return fmt.Errorf("field %q: %s is not a valid bool: %w", path, source, err)
-		}
-		fv.SetBool(b)
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		n, err := strconv.ParseInt(s, 10, fv.Type().Bits())
-		if err != nil {
-			return fmt.Errorf("field %q: %s is not a valid int: %w", path, source, err)
-		}
-		fv.SetInt(n)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		n, err := strconv.ParseUint(s, 10, fv.Type().Bits())
-		if err != nil {
-			return fmt.Errorf("field %q: %s is not a valid uint: %w", path, source, err)
-		}
-		fv.SetUint(n)
-	case reflect.Float32, reflect.Float64:
-		f, err := strconv.ParseFloat(s, fv.Type().Bits())
-		if err != nil {
-			return fmt.Errorf("field %q: %s is not a valid float: %w", path, source, err)
-		}
-		fv.SetFloat(f)
-	case reflect.Slice:
+	if fv.Kind() == reflect.Slice {
 		if fv.Type().Elem().Kind() != reflect.String {
 			return fmt.Errorf("field %q: %s cannot be applied to type %s", path, source, fv.Type())
 		}
@@ -632,32 +607,12 @@ func setScalarFromString(fv reflect.Value, s, source, path string) error {
 			out.Index(i).SetString(p)
 		}
 		fv.Set(out)
-	default:
-		return fmt.Errorf("field %q: %s cannot be applied to type %s", path, source, fv.Type())
+		return nil
+	}
+	if err := pkgconfig.SetFromString(s, fv); err != nil {
+		return fmt.Errorf("field %q: %s: %w", path, source, err)
 	}
 	return nil
-}
-
-// isZeroValue 按类型判断字段当前值是否为零值（0/""/false/nil/空切片）。
-func isZeroValue(v reflect.Value) bool {
-	switch v.Kind() {
-	case reflect.String:
-		return v.String() == ""
-	case reflect.Bool:
-		return !v.Bool()
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return v.Int() == 0
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return v.Uint() == 0
-	case reflect.Float32, reflect.Float64:
-		return v.Float() == 0
-	case reflect.Slice:
-		return v.Len() == 0
-	case reflect.Pointer, reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
-		return v.IsNil()
-	default:
-		return v.IsZero()
-	}
 }
 
 // splitCommaList 逗号切分并去除每段首尾空格，丢弃空段（`"a, b"` → ["a","b"]）。
@@ -673,8 +628,10 @@ func splitCommaList(s string) []string {
 }
 
 // validateRangeField 校验数值字段（含 time.Duration）是否落在 range 区间内。
+// Duration 的类型同一性判定单源在 pkg/config.DurationType（core#129）：
+// 「这个字段是不是时长字段」全矩阵一份答案，标量解析与 range 文法不各判各的。
 func validateRangeField(fv reflect.Value, rng, path string) error {
-	isDur := fv.Type() == durationType
+	isDur := fv.Type() == pkgconfig.DurationType
 	if !isDur && !isNumericKind(fv.Kind()) {
 		return fmt.Errorf("field %q: range tag only applies to numeric fields, got %s", path, fv.Type())
 	}

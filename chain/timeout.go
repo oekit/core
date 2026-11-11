@@ -24,10 +24,11 @@ func WithLatePanicReporter(fn func(ctx context.Context, pv *PanicError)) Timeout
 	return func(c *timeoutConfig) { c.latePanic = fn }
 }
 
-// reportLate 上报「无人接收的迟到 panic」。
+// reportLate 上报「无人接收的迟到 panic」。钩子形态与 Recovery 的上报
+// 不同（*PanicError 指针），panic 隔离共用 reportIsolated（core#135 单源）。
 func (c *timeoutConfig) reportLate(ctx context.Context, pv *PanicError) {
 	if c.latePanic != nil {
-		reportIsolatedPtr(c.latePanic, ctx, pv)
+		reportIsolated(func() { c.latePanic(ctx, pv) })
 		return
 	}
 	// 默认出口：超时路径的迟到 panic 若不落地就等于**彻底消失**——排障时
@@ -38,12 +39,6 @@ func (c *timeoutConfig) reportLate(ctx context.Context, pv *PanicError) {
 		"panic", pv.Value,
 		"stack", pv.Stack,
 	)
-}
-
-// reportIsolatedPtr 与 reportIsolated 同义，指针形态（Timeout 的钩子签名）。
-func reportIsolatedPtr(reporter func(context.Context, *PanicError), ctx context.Context, pv *PanicError) {
-	defer func() { _ = recover() }()
-	reporter(ctx, pv)
 }
 
 // Timeout 返回超时中间件：为下游派生带 deadline 的 ctx，超时先到即返回

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+
+	pkgconfig "github.com/oekit/pkg/config"
 )
 
 // EnvNaming 描述 **env 变量名**的命名策略：全局前缀 + 逐字段覆盖。
@@ -166,7 +168,7 @@ func resolveEnvName(sf reflect.StructField, yamlPath string, addr bool, n EnvNam
 // 「cannot be applied to type」这种指向不明的错误。显式 env tag 不受此限
 // （那是调用方自己写的，历史上照报）。
 func envSettableType(t reflect.Type) bool {
-	if t == durationType {
+	if t == pkgconfig.DurationType {
 		return true
 	}
 	switch t.Kind() {

@@ -36,11 +36,14 @@ func WithPanicReporter(fn func(ctx context.Context, req any, pv PanicError)) Rec
 	return func(c *recoveryConfig) { c.reporter = fn }
 }
 
-// reportIsolated 在 panic 隔离下调用 reporter。
+// reportIsolated 在 panic 隔离下调用钩子（core#135 单源：chain 包内所有
+// 「钩子自身可能 panic」的调用点——Recovery 的上报与 Timeout 的迟到 panic
+// 上报——共用这一个隔离壳，参数形态差异由调用点闭包包一层；「钩子自身
+// panic 会打死进程」的论证只留这一份）。
 //
 // 为什么必须有隔离：Recovery 的 report 调用发生在**已经 recover 过的 defer
 // 闭包内部**——该闭包里再 panic，同级的其他 defer 已经执行完毕，没有任何
-// recover 会接住它 ⇒ **整个进程退出**。而 reporter 恰恰是最可能 panic 的
+// recover 会接住它 ⇒ **整个进程退出**。而钩子恰恰是最可能 panic 的
 // 代码（第三方监控 SDK、序列化 req 失败、并发 map 写入等）。
 // middleware/chainmw 的同名钩子早有 reportIsolated，本包这个原始实现漏了。
 //
@@ -48,9 +51,9 @@ func WithPanicReporter(fn func(ctx context.Context, req any, pv PanicError)) Rec
 // 标准库），没有日志后端可写。需要观测「reporter 自己也挂了」请改用
 // middleware/chainmw（它有 logx 可记 reporter_panic）。这里优先级明确：
 // 保住进程 > 记录钩子失败。
-func reportIsolated(reporter func(context.Context, any, PanicError), ctx context.Context, req any, pv PanicError) {
+func reportIsolated(report func()) {
 	defer func() { _ = recover() }()
-	reporter(ctx, req, pv)
+	report()
 }
 
 // Recovery 返回 panic 恢复中间件：下游 panic 被转换为 *PanicError 返回，
@@ -66,7 +69,7 @@ func Recovery(opts ...RecoveryOption) Middleware {
 				if r := recover(); r != nil {
 					pv := PanicError{Value: r, Stack: string(debug.Stack())}
 					if cfg.reporter != nil {
-						reportIsolated(cfg.reporter, ctx, req, pv)
+						reportIsolated(func() { cfg.reporter(ctx, req, pv) })
 					}
 					resp, err = nil, &pv
 				}
@@ -76,7 +79,7 @@ func Recovery(opts ...RecoveryOption) Middleware {
 			// 收编成错误再往上抛）⇒ 同样走上报钩子，与「直接 panic」的路径
 			// 口径一致（否则这类 panic 不会出现在 Sentry 等上报里）。
 			if pe, ok := err.(*PanicError); ok && cfg.reporter != nil {
-				reportIsolated(cfg.reporter, ctx, req, *pe)
+				reportIsolated(func() { cfg.reporter(ctx, req, *pe) })
 			}
 			return resp, err
 		}

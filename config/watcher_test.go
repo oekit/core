@@ -117,12 +117,9 @@ func TestConfigWatcher_OnChange(t *testing.T) {
 
 	watcher := NewConfigWatcher(source, parser)
 
-	var called bool
-	var mu sync.Mutex
+	called := make(chan struct{}, 1)
 	watcher.OnChange(func(old, new *testConfig) {
-		mu.Lock()
-		called = true
-		mu.Unlock()
+		called <- struct{}{}
 	})
 
 	// 初始加载
@@ -130,12 +127,13 @@ func TestConfigWatcher_OnChange(t *testing.T) {
 		t.Fatalf("Reload failed: %v", err)
 	}
 
-	// 初始加载不应该触发回调
-	mu.Lock()
-	if called {
+	// 初始加载不应该触发回调（短暂等待，给异步投递留出「若会来早就来」
+	// 的窗口——core#137 后回调经 dispatch goroutine 异步投递）。
+	select {
+	case <-called:
 		t.Error("OnChange should not be called on first load")
+	case <-time.After(50 * time.Millisecond):
 	}
-	mu.Unlock()
 
 	// 更新配置
 	source.Update([]byte(`{"port":9090}`))
@@ -144,11 +142,11 @@ func TestConfigWatcher_OnChange(t *testing.T) {
 	}
 
 	// 第二次加载应该触发回调
-	mu.Lock()
-	if !called {
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
 		t.Error("OnChange should be called on second load")
 	}
-	mu.Unlock()
 }
 
 func TestConfigWatcher_Start(t *testing.T) {
