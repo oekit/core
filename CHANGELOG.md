@@ -1,5 +1,22 @@
 
 
+## [v0.15.0] — 2026-11-12
+
+- - feat(config): WithSkipUnmarshaler——严格模式对自带 UnmarshalYAML 的类型整段跳过通用递归，宿主专门裁决不再被通用文案降级、双判定面收拢（#127）；缺省行为不变，选项显式开启
+- refactor(config): setScalarFromString 标量解析改引 pkg/config.SetFromString 单源，core 侧「字符串按 reflect.Kind 解析落位」平行实现删除；durationType 判定单源 pkg/config.DurationType（#129，依赖 pkg v0.46.0）；**错误文案口径统一**：default/env 值解析失败的错误由英文短句（"is not a valid bool" 等）变为 pkg/config 的中文口径（"布尔值非法 %q" 等，本包 field/source 前缀保留）——对错误文案做正则/子串匹配的调用方需要同步；[]string 逗号切分（元素去空白、丢空段）语义不变
+- refactor(config): deepCopyValue 单源 pkg/reflectx.DeepCopyValue——core#102 指针环防护与 core#84 struct 深拷贝强语义随实现单源，pkg/pagination 同批收敛（#130）
+- refactor(config): validateEnvNaming 与 LintEnvNaming 的判定内核收敛 envNameMismatch，lint 与硬校验口径不再分叉（#131）
+- refactor(network): IsPublicIP 特殊段判定改引 pkg/urlguard.IsBlockedIP——ipv6SpecialCIDRs 列表与 IPv4 字节级 switch 删除，IANA 特殊段知识三处手工对账收拢 pkg 单源（#132）；判定结果与清单逐段一致有 golden 测试钉住
+- refactor(config): isZeroValue 手写零值判定改 stdlib reflect.Value.IsZero（#133）；**行为变化**：非 nil 空切片字段不再算零值——`field: []` 不被 default/env 覆盖、退化 require 校验视为已提供（LoadBootstrap 默认接线 FieldSet，主路径不变；直调 FillDefaults/ApplyEnv/ValidateTags 不带 FieldSet 时生效）
+- refactor(network): collectInterfaceIPs 单源取址，GetLanIPs/ServerIPString/ServerIP/GetLocalIP 四处遍历循环收敛为谓词 + 归约（#134）
+- refactor(chain): reportIsolated 收敛 report func() 单参形态，reportIsolatedPtr 删除（#135）
+- refactor(lifecycle): Shutdown 错误面 panic 收编单源 pkg/errors.Recovered——panic(err) 身份不丢（errors.Is/As 可直达原始错误），文本由 "panicked: %v" 变 "panic: %T: %v"（#136）；对文案做匹配的部署门禁需同步
+- fix(config): ConfigWatcher.Reload 的 onChange 队列化投递——入队留 dispatchMu 内（保序 = Swap 序），执行在独立 dispatch goroutine（锁外）：回调内重入 Reload、跨 goroutine 等待 Reload、慢回调卡投递三类死锁/阻塞形态消除（#137）；**行为变化**：onChange 不再在 Reload 调用栈上同步执行（Get 在 Reload 返回时已见新值，回调随后按序送达）；回调 panic 就地收编为 ERROR 日志（pkg/errors.Recovered），dispatch 循环存续——历史行为是打死进程面
+- feat(transport): 新增 transport/hertzbridge 子包——hertz RequestContext/RequestHeader/ResponseHeader → transport 抽象的适配单源（middleware#177 中期方案、middleware#180 落点）：NewServerTransport/NewServerContext/NewRequestHeader/NewReplyHeader，Get/Values 键匹配 EqualFold 大小写不敏感（hertz 侧 #163 的正确口径），transport 根包保持仅标准库；middleware 与 hertz 两仓 wave 3/4 改引
+- 战役级：Go 地板 1.26.0（go.mod + CI go-version '1.26'，job 名不变）；新增依赖 github.com/oekit/pkg v0.46.0（errors/config/urlguard/reflectx）
+
+本版使用的现代语言特性：reflect.TypeFor（yaml.Unmarshaler 接口类型与 DurationType 的声明）；min 内建（strict.go 编辑距离 DP，minInt 删除）；slices.Sort（严格模式合法键与 hertzbridge Keys 的排序）；range-over-int（reflectx 深拷贝循环）；泛型（ConfigWatcher[T] 的 pendingChange[T] 队列投递）。
+
 ## [v0.14.2] — 2026-11-11
 
 - fix(network): GetLocalIP 的 POD_IP 校验补上**非回环 / 非未指定**语义判据——127.0.0.1（回环）与 0.0.0.0（未指定）不再原样返回，与形状非法（not-an-ip、带端口、IPv6）同路 WARN 后回退网卡探测（#120）：core#87 的判据只有 `net.ParseIP + To4`（只挡「不是 IPv4 形状」），而 doc 契约明写「非回环 IPv4」——`POD_IP=127.0.0.1` / `0.0.0.0` 形状合法、语义非法，此前 err=nil 原样直达注册面，与同文件 podIPFallback 对回环打 ERROR（「回环地址不可被其他节点拨号」）的口径相反，同一地址在两条路径一静默一报警；判据改 net.IP 标准方法（IsLoopback/IsUnspecified，v4-mapped 写法 `::ffff:127.0.0.1` 同判），WARN 文案改为「不是合法的非回环 IPv4」与判据同口径；顺带把网卡探测失败的 errors.New 收敛为包级哨兵 errNoLocalIP（errors.Is 可判，测试不再正则扒文案）
