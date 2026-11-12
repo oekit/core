@@ -1,5 +1,11 @@
 
 
+## [v0.15.2] — 2026-11-13
+
+- fix(hertzbridge): firstFoldMatch 空值穿透——多值头首枚为空串时 Get 返回首个非空值，违反「Get=首值」契约（#164）。命中判定改独立 found 标志；godoc 补空首值不让位说明；补多值含空串回归测试（Get/Values/Keys 三方对齐）。pkg 地板 v0.47.1。
+
+关联问题单：core#164。
+
 ## [v0.15.1] — 2026-11-13
 
 - 15 单修复批：首载不回调契约 godoc（#138）、ErrParse/ErrTagPass/ErrEnvExpand 三哨兵（#139）、测试面去 hertz+CI guard（#140）、Lookup 前缀档 LastIndexByte 零分配（#141）、Listen 覆盖 Shutdown 执行期（#142）、CB 文案闭区间对齐（#143）、ConfigSource.Watch 非阻塞契约（#144）、internal/logkey 单源豁免（#149）、drain goroutine 走 pkg/errors.Recovered（#150）。
