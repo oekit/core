@@ -2,6 +2,7 @@ package hertzbridge
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -274,5 +275,40 @@ func TestEndpointHostUntrustedInput(t *testing.T) {
 	tr := NewServerTransport(c)
 	if got := tr.Endpoint(); got != "evil.com:8080" {
 		t.Fatalf("★ Endpoint 应为请求面 Host（不可信输入原样流出，#156）: %q", got)
+	}
+}
+
+// —— #164：Get=首值在「首枚命中值为空串」时不得让位 ——
+
+// TestGetFirstValueEmptyFirstMatch 钉住 core#164：多值 header 首枚值为空串
+// 时，Get 必须返回 ""（首值），不得穿透到后续非空值。旧实现以 out==""
+// 兼作「未命中」判定，空首值被吞、Get 返回了第二个值。
+func TestGetFirstValueEmptyFirstMatch(t *testing.T) {
+	c := newTestRequestContext(t)
+	c.Request.Header.Set("X-Tag", "") // 首枚：空串
+	c.Request.Header.Add("X-Tag", "real")
+	req := NewRequestHeader(&c.Request.Header)
+
+	if got := req.Get("x-tag"); got != "" {
+		t.Fatalf("★ Get 应返回首值（空串），不得穿透到后续值: got %q", got)
+	}
+	vs := req.Values("X-Tag")
+	if len(vs) != 2 || vs[0] != "" || vs[1] != "real" {
+		t.Fatalf("Values 应保留空串+real 两枚: %v", vs)
+	}
+	if ks := req.Keys(); !slices.Contains(ks, "X-Tag") {
+		t.Fatalf("Keys 应含 X-Tag（fixture 另有预置键）: %v", ks)
+	}
+
+	// 对照组：仅空串一枚也视为命中（与「不存在」区分的口径仍以空串返回，
+	// 这里钉的是不 panic、不落后续 header）
+	c2 := newTestRequestContext(t)
+	c2.Request.Header.Set("X-Only-Empty", "")
+	req2 := NewRequestHeader(&c2.Request.Header)
+	if got := req2.Get("x-only-empty"); got != "" {
+		t.Fatalf("仅空串一枚时 Get 仍应为空串: %q", got)
+	}
+	if vs2 := req2.Values("X-Only-Empty"); len(vs2) != 1 || vs2[0] != "" {
+		t.Fatalf("仅空串一枚时 Values 应恰含一枚空串: %v", vs2)
 	}
 }
