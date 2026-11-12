@@ -165,12 +165,10 @@ func TestConfigWatcher_DispatchOrder(t *testing.T) {
 	// 并发发起 n 次重载（内容互异，逐个换源再发）。
 	var fireWg sync.WaitGroup
 	for i := range n {
-		fireWg.Add(1)
-		go func(i int) {
-			defer fireWg.Done()
+		fireWg.Go(func() {
 			src.set([]byte(fmt.Sprintf(`{"name":"gen%d"}`, i+1)))
 			_ = w.Reload() // 竞争失败（代次落后被丢弃）也是合法结局
-		}(i)
+		})
 	}
 	fireWg.Wait()
 

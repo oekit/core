@@ -1,6 +1,9 @@
 package transport
 
-import "sort"
+import (
+	"maps"
+	"slices"
+)
 
 // MapHeader 是内存 Header 实现（map[string][]string），供测试与适配器使用。
 // 非并发安全——并发场景由使用方加锁或经框架适配层。
@@ -37,12 +40,7 @@ func (h MapHeader) Del(key string) {
 }
 
 func (h MapHeader) Keys() []string {
-	keys := make([]string, 0, len(h))
-	for k := range h {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(h))
 }
 
 // NoopHeader 是只读空实现：客户端实现的 ReplyHeader 占位，写入零值返回。

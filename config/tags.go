@@ -204,7 +204,7 @@ func targetStructValue(v any, fn string) (reflect.Value, error) {
 // v 必须是可寻址的 struct 值（来自指针 Elem 或切片元素）。
 func walkTaggedStruct(v reflect.Value, path, yamlPath string, yamlAddr bool, alloc bool, visit func(reflect.StructField, reflect.Value, string, string, bool) error) error {
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		sf := t.Field(i)
 		if !sf.IsExported() {
 			continue // 非导出字段不可 Set，也不属于配置面
@@ -241,14 +241,14 @@ func walkTaggedStruct(v reflect.Value, path, yamlPath string, yamlAddr bool, all
 			elem := sf.Type.Elem()
 			switch {
 			case elem.Kind() == reflect.Struct:
-				for j := 0; j < fv.Len(); j++ {
+				for j := range fv.Len() {
 					// yaml 路径不编号元素（与严格模式同口径），Go 路径照旧带下标。
 					if err := walkTaggedStruct(fv.Index(j), fmt.Sprintf("%s[%d]", fpath, j), childYaml, childAddr, alloc, visit); err != nil {
 						return err
 					}
 				}
 			case elem.Kind() == reflect.Pointer && elem.Elem().Kind() == reflect.Struct:
-				for j := 0; j < fv.Len(); j++ {
+				for j := range fv.Len() {
 					ev := fv.Index(j)
 					if ev.IsNil() {
 						continue
@@ -310,7 +310,7 @@ func typeHasTargetTags(t reflect.Type, seen map[reflect.Type]bool) bool {
 	if t.Kind() != reflect.Struct {
 		return false
 	}
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		sf := t.Field(i)
 		for _, name := range targetTagNames {
 			if _, ok := sf.Tag.Lookup(name); ok {

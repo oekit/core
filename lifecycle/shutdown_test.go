@@ -150,7 +150,7 @@ func TestManager_Acquire_Multiple(t *testing.T) {
 	mgr := New(5 * time.Second)
 
 	// 获取多个许可
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if !mgr.Acquire() {
 			t.Errorf("expected Acquire to return true at iteration %d", i)
 		}
@@ -161,7 +161,7 @@ func TestManager_Acquire_Multiple(t *testing.T) {
 	}
 
 	// 释放所有许可
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		mgr.Release()
 	}
 

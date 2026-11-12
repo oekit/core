@@ -83,7 +83,7 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet, envOv
 		return
 	}
 	t := dst.Type()
-	for i := 0; i < dst.NumField(); i++ {
+	for i := range dst.NumField() {
 		dstField := dst.Field(i)
 		srcField := src.Field(i)
 
@@ -258,7 +258,7 @@ func hasNestedExplicit(explicit FieldSet, fpath string) bool {
 // ApplyEnv 补记进 FieldSet 的键同口径。
 func mergeSliceElements(dstField, srcField reflect.Value, fpath string, explicit FieldSet, envOverlay bool) {
 	elem := dstField.Type().Elem()
-	for j := 0; j < srcField.Len(); j++ {
+	for j := range srcField.Len() {
 		epath := fmt.Sprintf("%s[%d]", fpath, j)
 		se := srcField.Index(j)
 		if j >= dstField.Len() {

@@ -139,7 +139,7 @@ func FieldSetFromYAML(v any, data []byte) (FieldSet, error) {
 func markSetFromYAML(v reflect.Value, node any, path string, set FieldSet) {
 	m, _ := node.(map[string]any)
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		sf := t.Field(i)
 		if !sf.IsExported() {
 			continue
@@ -195,7 +195,7 @@ func markSetFromYAML(v reflect.Value, node any, path string, set FieldSet) {
 			elem := sf.Type.Elem()
 			// 按 YAML 元素个数遍历：set 标记只关心「YAML 里写没写」，
 			// 不依赖 struct 切片当前长度（未填充时 fv.Len() 为 0）。
-			for j := 0; j < len(elems); j++ {
+			for j := range elems {
 				epath := fmt.Sprintf("%s[%d]", fpath, j)
 				switch {
 				case elem.Kind() == reflect.Struct:
