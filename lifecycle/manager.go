@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oekit/core/internal/logkey"
 	pkgerrors "github.com/oekit/pkg/errors"
 )
 
@@ -257,7 +258,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 					m.mu.Lock()
 					m.shutdownErrs = append(m.shutdownErrs, err)
 					m.mu.Unlock()
-					m.logger.Error("teardown failed", "err", err)
+					m.logger.Error("teardown failed", logkey.Err, err)
 				}
 			}
 		}
@@ -276,7 +277,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 					m.mu.Lock()
 					m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
 					m.mu.Unlock()
-					m.logger.Error("resource close failed", "resource", j.name, "err", err)
+					m.logger.Error("resource close failed", "resource", j.name, logkey.Err, err)
 				} else {
 					m.logger.Info("resource closed", "resource", j.name)
 				}

@@ -48,7 +48,10 @@ func expandEnv(data []byte) ([]byte, error) {
 		}
 		return groups[2]
 	})
-	return out, expandErr
+	if expandErr != nil {
+		return out, &envExpandErr{err: expandErr}
+	}
+	return out, nil
 }
 
 // yamlCorruptingSequence 找出替换值里会被 YAML 静默重释的字符序列：
@@ -80,15 +83,50 @@ func yamlCorruptingSequence(val string) (snippet, reason string) {
 // 为什么不用一个 wrap：LoadBootstrap 的历史文案是「parse config file X: ...」与
 // 「apply struct tags for config file X: ...」两条——若把二者合成一种，就无法在
 // 抽出 LoadFile / Unmarshal 后仍保持既有调用方看到的文案逐字不变。
+//
+// 错误分类哨兵（core#139）：两个载体的 Unwrap 以多错误形态同时交出导出
+// 哨兵与原始错误——调用方对 Unmarshal/LoadFile/LoadBootstrap 的返回值用
+// errors.Is(err, ErrParse / ErrTagPass / ErrEnvExpand) 即可编程分流，
+// 不再需要匹配文案前缀；Error() 只透传原文案，所有历史文案逐字不变。
+// 严格模式的 *UnknownKeyError 走 parseErr 通道，errors.As 判定不受影响。
 type parseErr struct{ err error }
 
 func (e *parseErr) Error() string { return e.err.Error() }
-func (e *parseErr) Unwrap() error { return e.err }
+
+func (e *parseErr) Unwrap() []error { return []error{ErrParse, e.err} }
 
 type tagErr struct{ err error }
 
 func (e *tagErr) Error() string { return e.err.Error() }
-func (e *tagErr) Unwrap() error { return e.err }
+
+func (e *tagErr) Unwrap() []error { return []error{ErrTagPass, e.err} }
+
+// envExpandErr 是 ${VAR} 注入安全拒载的分类载体（core#139）：expandEnv 对
+// 会静默损坏 YAML 的替换值 fail-closed 报错，本载体给它挂 ErrEnvExpand
+// 哨兵供 errors.Is 分流，Error() 透传原文案。
+type envExpandErr struct{ err error }
+
+func (e *envExpandErr) Error() string { return e.err.Error() }
+
+func (e *envExpandErr) Unwrap() []error { return []error{ErrEnvExpand, e.err} }
+
+// config 错误分类哨兵（core#139）。三者互斥：一次解码失败的错误链恰好挂
+// 其中一个（解析线 / tag 接线线 / env 展开线），与包内既有的可编程分流面
+// （严格模式 *UnknownKeyError、governance.ErrInvalidConfig）口径对齐——
+// 都以 errors.Is/As 判定，不做文案前缀匹配。
+var (
+	// ErrParse 标记 YAML 解析失败：语法损坏、解码类型不符、env 注入值破坏
+	// 标量上下文导致展开后不可解析（core#83 包装）以及严格模式未知键拒载。
+	ErrParse = errors.New("config: parse error")
+
+	// ErrTagPass 标记 tag 接线失败：ApplyEnv / FillDefaults / ValidateTags
+	// 任一 pass 返回错误（range/options 越界、require 缺失、env 卫生检查）。
+	ErrTagPass = errors.New("config: tag pass error")
+
+	// ErrEnvExpand 标记 ${VAR} 注入安全拒载：env 值含换行/注释符/反斜杠等
+	// 会让 YAML 静默损坏的序列，加载在解码前中止（core#59/#83 的 fail-closed）。
+	ErrEnvExpand = errors.New("config: env expansion refused")
+)
 
 // unmarshalInto 是**唯一的解码线**：展开 ${VAR} → 可选严格判定 → 解码 → tag 接线。
 // Unmarshal / LoadFile / LoadBootstrap 三个入口全部走它——严格模式、tag 语义、
@@ -147,28 +185,31 @@ func wrapEnvParseError(original, expanded []byte, err error) error {
 	return nil
 }
 
-// wrapFileError 给解码错误补上文件路径上下文。
+// wrapFileError 给解码错误补上文件路径上下文。透传**整个分类载体**而非拆出
+// 内层错误（core#139）：文案不变（载体的 Error() 就是内层文案），但分类载体
+// 与其哨兵留在链上，调用方 errors.Is 可达 ErrParse/ErrTagPass。
 func wrapFileError(path string, err error) error {
 	var pe *parseErr
 	if errors.As(err, &pe) {
-		return fmt.Errorf("parse config file %s: %w", path, pe.err)
+		return fmt.Errorf("parse config file %s: %w", path, pe)
 	}
 	var te *tagErr
 	if errors.As(err, &te) {
-		return fmt.Errorf("apply struct tags for config file %s: %w", path, te.err)
+		return fmt.Errorf("apply struct tags for config file %s: %w", path, te)
 	}
 	return fmt.Errorf("parse config file %s: %w", path, err)
 }
 
-// wrapByteError 给解码错误补上字节级上下文（无路径）。
+// wrapByteError 给解码错误补上字节级上下文（无路径）。透传整个分类载体，
+// 理由同 wrapFileError（core#139）。
 func wrapByteError(err error) error {
 	var pe *parseErr
 	if errors.As(err, &pe) {
-		return fmt.Errorf("parse config: %w", pe.err)
+		return fmt.Errorf("parse config: %w", pe)
 	}
 	var te *tagErr
 	if errors.As(err, &te) {
-		return fmt.Errorf("apply struct tags: %w", te.err)
+		return fmt.Errorf("apply struct tags: %w", te)
 	}
 	return err
 }

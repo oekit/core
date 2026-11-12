@@ -17,3 +17,25 @@ jobs:
     uses: oekit/.github/.github/workflows/go-ci.yml@main
     with:
       go-version: '1.26'
+
+  # hertz 依赖面守卫（core#140）：core 是基础层，hertz 这类框架重依赖只允许
+  # 存在于 transport/hertzbridge（单源适配层，middleware#177/#180 治本落点）
+  # 与 *_test.go。历史教训：version 测试曾为一条断言引入 hertz assert，把重
+  # 依赖传播给全矩阵下游（MVS 下每个 config/lifecycle/governance 消费方连带
+  # 接受）。本守卫防回潮——守卫面收紧/放宽（如 hertzbridge 拆嵌套模块）时
+  # 同步改这里。
+  guard-hertz:
+    name: Guard / hertz import surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: hertz import 只允许在 transport/hertzbridge 与测试代码
+        run: |
+          violators=$(grep -rl '"github.com/cloudwego/hertz' --include='*.go' . \
+            | grep -v '_test\.go$' \
+            | grep -v '^./transport/hertzbridge/' || true)
+          if [ -n "$violators" ]; then
+            echo "::error::hertz import 越界（只允许 transport/hertzbridge 与 *_test.go）:"
+            echo "$violators"
+            exit 1
+          fi

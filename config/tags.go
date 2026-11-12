@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oekit/core/internal/logkey"
 	pkgconfig "github.com/oekit/pkg/config"
 )
 
@@ -408,7 +409,7 @@ func applyEnvField(sf reflect.StructField, fv reflect.Value, path, yamlPath stri
 			// FieldSet 不补记（不算「已提供」）。
 			slog.Default().With("component", "config.env").Warn(
 				"skip unparsable env value (lenient mode)",
-				"field", path, "env", binding.name, "err", err.Error())
+				"field", path, "env", binding.name, logkey.Err, err.Error())
 			return nil
 		}
 		return err
