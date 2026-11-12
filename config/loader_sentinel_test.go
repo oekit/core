@@ -95,7 +95,7 @@ func TestSentinel_UnknownKeyStillAs(t *testing.T) {
 	var cfg struct {
 		Port int `yaml:"port"`
 	}
-	err := Unmarshal([]byte("port: 8080\nunknwon: 1\n"), &cfg, WithStrict())
+	err := Unmarshal([]byte("port: 8080\nnosuchkey: 1\n"), &cfg, WithStrict())
 	if err == nil {
 		t.Fatal("严格模式未知键应拒载")
 	}
