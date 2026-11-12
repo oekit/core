@@ -3,7 +3,9 @@ package config
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -145,7 +147,9 @@ func (w *ConfigWatcher[T]) Start(ctx context.Context) error {
 // 持 watcher 内部锁执行——回调里再调 Reload（含经别的 goroutine 间接等待
 // Reload 完成）不会死锁；慢回调不阻塞后续重载的 Swap（Get 立即可见新值，
 // 回调随后送达）。回调自身 panic 被隔离为 ERROR 日志，dispatch 循环存续
-// （历史行为是 panic 直接打死调用方 goroutine 所在的进程面）。
+// （历史行为是 panic 直接打死调用方 goroutine 所在的进程面）。隔离是
+// **无条件的**（core#157）：收编出口自身防 panic——宿主 logger（SetLogger
+// 注入）在记录这条日志时再 panic 也只降级 stderr 留痕，循环照样存续。
 //
 // 首次有回调可投递时才启动 dispatch goroutine；它与 watcher 同生命周期
 // （watcher 无 Close 语义，与既有行为一致）。
@@ -229,7 +233,33 @@ func (w *ConfigWatcher[T]) dispatchLoop() {
 	}
 }
 
+// logRecovered 在 panic 收编出口内安全留痕（core#157 单源：deliver 与
+// OverlaySource.Watch 的收编出口共用这一份防御，「收编出口再 panic 会打死
+// goroutine」的论证只留这一份，chain.reportIsolated 同款论证的镜像）。
+//
+// 为什么必须有兜底：收编出口运行在**已消费过 recover 的 defer 闭包内**——
+// 留痕调用（宿主注入的 logger / slog.Default：第三方日志 SDK 内部错误、
+// 并发 map 写、序列化故障都可能 panic）在出口内再 panic 时，同一 goroutine
+// 上已无任何 recover 可接 ⇒ goroutine 整体 abort（进程级退出）。「回调
+// panic 被隔离、循环存续」的承诺隐含了「logger 不 panic」这一未声明前提。
+//
+// 兜底再降级：logger 挂了说明日志管线本身故障，此时连 slog.Default 都可能
+// 是同一个坏 handler——os.Stderr 写入不能 panic（失败仅忽略），是最后的
+// 留痕通道。不留痕的兜底等于把故障藏两次，运维现场至少要剩一条事故痕迹。
+func logRecovered(fallback string, log func()) {
+	defer func() {
+		if pkgerrors.Recovered(recover()) != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "%s\n", fallback)
+		}
+	}()
+	log()
+}
+
 // deliver 执行单条回调，panic 收编为日志。
+//
+// 收编出口自身防 panic（core#157，logRecovered 单源）：宿主注入的 logger
+// 在这条恢复路径上再 panic 只降级 stderr，dispatch goroutine 不死——
+// OnChange 的「dispatch 循环存续」承诺不再隐含「logger 不 panic」前提。
 func (w *ConfigWatcher[T]) deliver(item pendingChange[T]) {
 	defer func() {
 		perr := pkgerrors.Recovered(recover())
@@ -241,8 +271,14 @@ func (w *ConfigWatcher[T]) deliver(item pendingChange[T]) {
 		if errors.As(perr, &pe) {
 			stack = string(pe.Stack)
 		}
-		w.logger().Error("config onChange panicked (isolated by dispatch loop)",
-			logkey.Err, perr.Error(), "stack", stack)
+		logRecovered(
+			fmt.Sprintf("config: onChange panicked (dispatch loop survived, logger panicked while reporting): %v\n%s",
+				perr, stack),
+			func() {
+				w.logger().Error("config onChange panicked (isolated by dispatch loop)",
+					logkey.Err, perr.Error(), "stack", stack)
+			},
+		)
 	}()
 	item.fn(item.old, item.nw)
 }
