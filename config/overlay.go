@@ -187,7 +187,7 @@ func growOverlaySlices(overlay, dst reflect.Value, path string, grown *[]grownSl
 		return
 	}
 	t := overlay.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		if !t.Field(i).IsExported() {
 			continue
 		}
@@ -206,7 +206,7 @@ func growOverlaySlices(overlay, dst reflect.Value, path string, grown *[]grownSl
 			}
 			g := reflect.MakeSlice(of.Type(), df.Len(), df.Len())
 			if isStructPtr {
-				for j := 0; j < df.Len(); j++ {
+				for j := range df.Len() {
 					g.Index(j).Set(reflect.New(elem.Elem())) // 指向零值，元素字段可被 env 命中
 				}
 			}

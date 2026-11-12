@@ -7,7 +7,6 @@ import (
 	"os"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -140,7 +139,7 @@ func wrapEnvParseError(original, expanded []byte, err error) error {
 			}
 		}
 		if len(keys) > 0 {
-			sort.Strings(keys)
+			slices.Sort(keys)
 			return fmt.Errorf("yaml became unparseable after expanding env placeholders (%s): %w — an injected env value likely broke its scalar context; inject it via ApplyEnvOverlay instead",
 				strings.Join(keys, ", "), err)
 		}

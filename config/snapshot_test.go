@@ -110,20 +110,16 @@ func TestSnapshot_LoadPairConsistentUnderConcurrentPublish(t *testing.T) {
 
 	const rounds = 20000
 	var stop sync.WaitGroup
-	stop.Add(1)
-	go func() {
-		defer stop.Done()
+	stop.Go(func() {
 		for i := 1; i <= rounds; i++ {
 			s.Publish(&snapConfig{Seq: uint64(i)})
 		}
-	}()
+	})
 
 	var readers sync.WaitGroup
 	done := make(chan struct{})
-	for r := 0; r < 4; r++ {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
+	for range 4 {
+		readers.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -140,7 +136,7 @@ func TestSnapshot_LoadPairConsistentUnderConcurrentPublish(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	stop.Wait()
@@ -163,14 +159,12 @@ func TestSnapshot_ConcurrentPublishUniqueVersions(t *testing.T) {
 
 	const publishers, rounds = 4, 2000
 	var wg sync.WaitGroup
-	for p := 0; p < publishers; p++ {
-		wg.Add(1)
-		go func(p int) {
-			defer wg.Done()
+	for p := range publishers {
+		wg.Go(func() {
 			for i := 1; i <= rounds; i++ {
 				s.Publish(&snapConfig{Seq: uint64(p*rounds + i)})
 			}
-		}(p)
+		})
 	}
 	wg.Wait()
 
@@ -183,18 +177,14 @@ func TestSnapshot_ConcurrentReadersAndPublisher(t *testing.T) {
 	// -race 下的读写混跑：这条不判语义，只兜「读路径动了不该动的锁/字段」。
 	s := NewSnapshot(&snapConfig{Name: "defaults"})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 1; i <= 500; i++ {
 			s.Publish(&snapConfig{Seq: uint64(i)})
 		}
-	}()
-	for r := 0; r < 4; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 500; i++ {
+	})
+	for range 4 {
+		wg.Go(func() {
+			for range 500 {
 				if s.Get() == nil {
 					t.Error("Get 返 nil")
 					return
@@ -202,7 +192,7 @@ func TestSnapshot_ConcurrentReadersAndPublisher(t *testing.T) {
 				_ = s.Version()
 				_, _ = s.Load()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

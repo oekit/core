@@ -12,25 +12,22 @@ import (
 // The race window is between m.mu.Unlock() after copying teardowns and the
 // range m.jobs evaluation. Run with -race to verify.
 func TestShutdownConcurrentAddAndShutdown(t *testing.T) {
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		m := New(time.Second)
 		m.Add("first", func(ctx context.Context) error { return nil }, 0)
 
 		var wg sync.WaitGroup
-		wg.Add(2)
 
 		// Concurrently add jobs while Shutdown reads m.jobs without lock.
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+		wg.Go(func() {
+			for range 50 {
 				m.Add("concurrent", func(ctx context.Context) error { return nil }, 0)
 			}
-		}()
+		})
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			m.Shutdown(context.Background())
-		}()
+		})
 
 		wg.Wait()
 	}
@@ -40,27 +37,24 @@ func TestShutdownConcurrentAddAndShutdown(t *testing.T) {
 // appending to m.shutdownErrs (without lock) and Errors reading m.shutdownErrs
 // (without lock).
 func TestShutdownConcurrentErrors(t *testing.T) {
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		m := New(time.Second)
 		m.Add("fail", func(ctx context.Context) error {
 			return context.DeadlineExceeded
 		}, 0)
 
 		var wg sync.WaitGroup
-		wg.Add(2)
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			m.Shutdown(context.Background())
-		}()
+		})
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// Continuously read Errors while Shutdown appends to shutdownErrs.
-			for j := 0; j < 50; j++ {
+			for range 50 {
 				_ = m.Errors()
 			}
-		}()
+		})
 
 		wg.Wait()
 	}

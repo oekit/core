@@ -32,6 +32,7 @@ package hertzbridge
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 
@@ -168,10 +169,5 @@ func keysFromVisitAll(visitAll func(fn func(k, v []byte))) []string {
 	visitAll(func(k, _ []byte) {
 		seen[string(k)] = struct{}{}
 	})
-	keys := make([]string, 0, len(seen))
-	for k := range seen {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
+	return slices.Sorted(maps.Keys(seen))
 }

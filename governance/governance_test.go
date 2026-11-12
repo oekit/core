@@ -170,21 +170,17 @@ func TestStore_ConsistentValueAndVersion(t *testing.T) {
 	stop := make(chan struct{})
 	// 读侧：值内标记的代次必须与读到的版本一致（或至多偏新——跨两次读）。
 	for range writers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 1; i <= iters; i++ {
 				cfg := &Config{TimeoutMs: map[string]int{"mark": i}}
 				s.Update(cfg)
 			}
-		}()
+		})
 	}
 	inconsistent := int64(0)
 	var rWG sync.WaitGroup
 	for range 2 {
-		rWG.Add(1)
-		go func() {
-			defer rWG.Done()
+		rWG.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -199,7 +195,7 @@ func TestStore_ConsistentValueAndVersion(t *testing.T) {
 					atomic.AddInt64(&inconsistent, 1)
 				}
 			}
-		}()
+		})
 	}
 	for range writers {
 		wg.Wait()

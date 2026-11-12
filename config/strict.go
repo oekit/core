@@ -168,7 +168,7 @@ type fieldInfo struct {
 // 与 yaml.v3 对齐的说明）。
 func yamlFields(t reflect.Type, prefix []int) (fields map[string]fieldInfo, inlineMap reflect.Type) {
 	fields = map[string]fieldInfo{}
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		sf := t.Field(i)
 		// yaml.v3 的规则是「跳过**私有且非匿名字段**」——匿名的未导出类型
 		// （`inner` 内嵌）**仍会被处理**（实测：内嵌 + `,inline` 的未导出结构体
