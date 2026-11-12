@@ -1,5 +1,9 @@
 
 
+## [v0.15.1] — 2026-11-13
+
+- 15 单修复批：首载不回调契约 godoc（#138）、ErrParse/ErrTagPass/ErrEnvExpand 三哨兵（#139）、测试面去 hertz+CI guard（#140）、Lookup 前缀档 LastIndexByte 零分配（#141）、Listen 覆盖 Shutdown 执行期（#142）、CB 文案闭区间对齐（#143）、ConfigSource.Watch 非阻塞契约（#144）、internal/logkey 单源豁免（#149）、drain goroutine 走 pkg/errors.Recovered（#150）。
+
 ## [v0.15.0] — 2026-11-12
 
 - - feat(config): WithSkipUnmarshaler——严格模式对自带 UnmarshalYAML 的类型整段跳过通用递归，宿主专门裁决不再被通用文案降级、双判定面收拢（#127）；缺省行为不变，选项显式开启
