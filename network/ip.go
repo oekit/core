@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/oekit/core/internal/logkey"
 	"github.com/oekit/pkg/urlguard"
 )
 
@@ -213,7 +214,9 @@ func GetPodIP() string {
 // 返回回环地址。返回值保持历史行为不变——调用方若拿它去注册，会被注册侧
 // 的回环拒绝（registry#64）拦下；本函数的价值是让「为什么」可见。
 func podIPFallback(err error) string {
+	// 字段名用单源 logkey.Err（core#149）：此前手写 "error" 与矩阵统一的
+	// "err" 真实分裂——按 err 检索 GetPodIP 回退告警查不到这条记录。
 	slog.Error("network: GetLocalIP 失败，GetPodIP 回退 127.0.0.1——回环地址不可被其他节点拨号，注册侧应拒绝（oekit#141）",
-		"component", "network.podip", "error", err)
+		"component", "network.podip", logkey.Err, err)
 	return "127.0.0.1"
 }

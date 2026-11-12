@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/oekit/core/internal/logkey"
 	pkgerrors "github.com/oekit/pkg/errors"
 )
 
@@ -15,8 +16,14 @@ type ConfigSource interface {
 	// Read 读取配置内容。
 	Read() ([]byte, error)
 
-	// Watch 监听配置变化，变化时调用 onChange。
-	// 应在 ctx 取消时停止监听。
+	// Watch 启动配置监听，变化时调用 onChange。
+	//
+	// 契约（core#144 钉死，同包 OverlaySource.Watch 依赖同一口径）：
+	//   - **非阻塞**：启动监听后即返回，监听在实现自起的 goroutine 内进行——
+	//     阻塞式实现会让 ConfigWatcher.Start 在同步调用本方法时永不返回；
+	//   - ctx 取消时停止监听，自起的 goroutine 退出；
+	//   - onChange 由实现自起的 goroutine 调用（可能滞后于源的实际变化），
+	//     实现负责对回调 panic 自行收编（OverlaySource 是参考实现）。
 	Watch(ctx context.Context, onChange func())
 }
 
@@ -100,6 +107,15 @@ func (w *ConfigWatcher[T]) Get() *T {
 
 // Start 启动配置监听。
 // 会先执行一次初始加载，然后监听配置变化。
+//
+// 初始加载**不触发 OnChange 回调**（core#138 钉死契约）：回调只在第二次
+// 及以后的重载投递（且 old/new 两值齐备——首载没有 old 可交）。要拿到
+// 初始配置，在 Start 返回后直接 Get()；组合 config.Snapshot 时请手动
+// 补一次首载发布（见 Snapshot 包文档「与 ConfigWatcher 的分工」示例）。
+//
+// 随后对 ConfigSource.Watch 的调用依赖其**非阻塞**契约（见 ConfigSource
+// 接口文档，core#144）：Watch 在自起 goroutine 内监听、立即返回，本方法
+// 因此同步返回 nil——不会等待任何监听结束。
 func (w *ConfigWatcher[T]) Start(ctx context.Context) error {
 	// 初始加载
 	if err := w.Reload(); err != nil {
@@ -109,7 +125,7 @@ func (w *ConfigWatcher[T]) Start(ctx context.Context) error {
 	// 监听变化
 	w.source.Watch(ctx, func() {
 		if err := w.Reload(); err != nil {
-			w.logger().Error("config reload failed", "err", err)
+			w.logger().Error("config reload failed", logkey.Err, err)
 		}
 	})
 
@@ -117,6 +133,12 @@ func (w *ConfigWatcher[T]) Start(ctx context.Context) error {
 }
 
 // OnChange 注册配置变更回调。
+//
+// **首载不回调**（core#138 钉死契约）：Start 的初始加载与 Reload 首次
+// 应用（此前 Get 返回 nil）都不会触发回调——回调只在第二次及以后的
+// 重载投递，old/new 两值齐备。这是有意行为（watcher_test 有测试钉住）：
+// 首载交不出有意义的 old 值，回调里「diff 新旧」的常见写法会被 nil 打穿。
+// 要处理初始配置，请在 Start 返回后直接读 Get()。
 //
 // 回调在**独立的 dispatch goroutine 上串行执行**（core#137 队列化投递）：
 // 同一 watcher 的回调按重载应用的次序（Swap 序）逐个投递，永不并发、永不
@@ -220,7 +242,7 @@ func (w *ConfigWatcher[T]) deliver(item pendingChange[T]) {
 			stack = string(pe.Stack)
 		}
 		w.logger().Error("config onChange panicked (isolated by dispatch loop)",
-			"err", perr.Error(), "stack", stack)
+			logkey.Err, perr.Error(), "stack", stack)
 	}()
 	item.fn(item.old, item.nw)
 }

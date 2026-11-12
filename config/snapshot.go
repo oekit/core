@@ -67,8 +67,17 @@ import (
 // 且 `Get` 在一开始还没有值时会返 nil（它必须先 Reload 一次）。
 // `Snapshot[T]` 管的是**值**：原子发布与无判空读取，不认识来源、不解析、不重载。
 // 两者可组合——需要「源驱动的自动重载 + 无判空读取」时，在
-// `ConfigWatcher.OnChange` 里把新值 `snap.Publish` 出去即可；只需要「别人给我值，
-// 我原子发布」时（Nacos Listen 回调、管理端点、K8s informer），只要 Snapshot。
+// `ConfigWatcher.OnChange` 里把新值 `snap.Publish` 出去即可。**注意首载
+// 不触发 OnChange**（core#138，OnChange 契约如此）：不补首载发布的话，
+// Snapshot 在第一次变更前会一直停在 defaults——按官方组合示例接线的消费方
+// 曾因此静默拿到端口/超时全零值。Start 返回后手动补一次：
+//
+//	watcher.OnChange(snap.Publish)
+//	if err := watcher.Start(ctx); err != nil { ... }
+//	snap.Publish(watcher.Get()) // 首载补发：OnChange 从第二次重载才开始投递
+//
+// 只需要「别人给我值，我原子发布」时（Nacos Listen 回调、管理端点、K8s
+// informer），只要 Snapshot。
 //
 // Snapshot 的**零值不可用**：内部单元未初始化，`Get`/`Load`/`Version` 会在空指针上
 // panic（不是返 nil——nil 会让判空样板重新扩散回来）。一律用 NewSnapshot 构造。

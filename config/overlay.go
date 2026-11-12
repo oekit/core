@@ -82,9 +82,10 @@ func (o *overlaySource) Watch(ctx context.Context, onChange func()) {
 			src.Watch(ctx, onChange)
 		}()
 	}
-	// 不设汇合 goroutine：Watch 的契约是「启动监听后即返回」，没有需要
-	// 等待的汇合点；各子源 goroutine 的生命周期由 ctx 取消驱动（子源自行
-	// 观察，ConfigSource 契约），或被上方的 recover 出口终止。
+	// 不设汇合 goroutine：Watch 的契约是「启动监听后即返回」（core#144
+	// 钉死在 ConfigSource 接口文档，本注释与之同源），没有需要等待的汇合
+	// 点；各子源 goroutine 的生命周期由 ctx 取消驱动（子源自行观察，
+	// ConfigSource 契约），或被上方的 recover 出口终止。
 }
 
 // deepMergeMaps 深合并 b 到 a（b 覆盖 a）：map 递归合并，其余类型整体覆盖。
