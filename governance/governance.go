@@ -48,7 +48,11 @@ type RetryPolicy struct {
 
 // CBPolicy 是单个 key 的熔断策略。
 type CBPolicy struct {
-	// ErrorRateThreshold 错误率阈值(0-1)。
+	// ErrorRateThreshold 错误率阈值，**闭区间 [0,1]**（core#143：实现与文案
+	// 此前写 (0,1)，0 与 1 实际都通过校验——文案失实会诱导运维把合法的
+	// 端点值改掉重发一版配置）。端点语义按熔断器通行 ≥ 口径：达到
+	// MinRequests 后错误率 ≥ 阈值即熔断——0 表示达到 MinRequests 即熔断
+	// （错误率不可能 < 0），1 表示错误率满格（全部失败）才熔断。
 	ErrorRateThreshold float64 `json:"error_rate_threshold"`
 	// MinRequests 触发统计的最小请求数。
 	MinRequests int64 `json:"min_requests"`
@@ -113,7 +117,9 @@ func (c *Config) Validate() error {
 	}
 	for key, cb := range c.CircuitBreaker {
 		if cb.ErrorRateThreshold < 0 || cb.ErrorRateThreshold > 1 {
-			return fmt.Errorf("%w: circuit_breaker[%q].error_rate_threshold out of (0,1)", ErrInvalidConfig, key)
+			// 文案与实现同口径（core#143）：校验是闭区间 [0,1]，与 retry 的
+			// "[0,10]" 同格式——写 (0,1) 会诱导运维误以为端点值非法。
+			return fmt.Errorf("%w: circuit_breaker[%q].error_rate_threshold out of range [0,1]", ErrInvalidConfig, key)
 		}
 		if cb.OpenMs < 0 {
 			return fmt.Errorf("%w: circuit_breaker[%q].open_ms negative", ErrInvalidConfig, key)
@@ -254,7 +260,7 @@ func (c *Config) LookupRetry(svc, method string) (RetryPolicy, bool) {
 // LookupLimiter 按 "METHOD:path" → "path" → path 前缀最长匹配(按「/」段边界,
 // method 限定的 "GET:/order" 优先于裸 "/order") → "" 顺序取限流策略。
 func (c *Config) LookupLimiter(method, path string) (LimiterPolicy, bool) {
-	v, _, ok := lookupPolicyKey(c.Limiter, method+":"+path, path)
+	v, _, ok := lookupPolicyKey(c.Limiter, method, path)
 	return v, ok
 }
 
@@ -263,7 +269,7 @@ func (c *Config) LookupLimiter(method, path string) (LimiterPolicy, bool) {
 // 做限流桶分片——高基数 path(如 /order/123)在粗粒度(前缀/全局)策略下
 // 若按原始 path 建桶,桶表会无界增长。
 func (c *Config) LookupLimiterKey(method, path string) (LimiterPolicy, string, bool) {
-	return lookupPolicyKey(c.Limiter, method+":"+path, path)
+	return lookupPolicyKey(c.Limiter, method, path)
 }
 
 func lookup[T any](m map[string]T, svc, method string) (T, bool) {
@@ -280,8 +286,11 @@ func lookup[T any](m map[string]T, svc, method string) (T, bool) {
 	// 前缀档（core#78）：service 按「.」段前缀从长到短匹配——com.example
 	// 命中 com.example.svc。没有这一档时，按 service 前缀统一配置的治理
 	// 策略对高基数 service 名静默失效（与包 doc「前缀最长匹配」契约矛盾）。
-	for _, p := range segmentPrefixes(svc, ".") {
-		if v, ok := m[p]; ok {
+	// 候选段直接在 svc 上以 LastIndexByte 从长到短游走（core#141）：此前
+	// 先物化前缀切片再整体倒置，每次查询一次 slice 分配；这里候选键是
+	// svc 的子串，map 查找零分配——限流/超时中间件的每请求热路径。
+	for i := strings.LastIndexByte(svc, '.'); i > 0; i = strings.LastIndexByte(svc[:i], '.') {
+		if v, ok := m[svc[:i]]; ok {
 			return v, true
 		}
 	}
@@ -293,25 +302,30 @@ func lookupPolicy[T any](m map[string]T, full, prefix string) (T, bool) {
 	return lookup(m, full, prefix)
 }
 
-func lookupPolicyKey[T any](m map[string]T, full, prefix string) (T, string, bool) {
+func lookupPolicyKey[T any](m map[string]T, method, path string) (T, string, bool) {
 	var zero T
 	if m == nil {
 		return zero, "", false
 	}
-	if v, ok := m[full]; ok {
-		return v, full, true
+	if v, ok := m[method+":"+path]; ok {
+		return v, method + ":" + path, true
 	}
-	if v, ok := m[prefix]; ok {
-		return v, prefix, true
+	if v, ok := m[path]; ok {
+		return v, path, true
 	}
 	// 前缀档（core#78）：path 按「/」段前缀从长到短逐档试，每档先试
 	// method 限定键（"GET:/order" 比 "/order" 更具体，命中即返回），再试
 	// 裸 path 键。命中的是**配置键**而非原始 path：LookupLimiterKey 借此
 	// 把粗粒度键交给消费方做限流桶分片（桶表有界）。
-	method := strings.TrimSuffix(full, ":"+prefix)
-	for _, p := range segmentPrefixes(prefix, "/") {
-		if v, ok := m[method+":"+p]; ok {
-			return v, method + ":" + p, true
+	// core#141：候选段直接在 path 上游走（零切片分配）；method 限定键仍需
+	// 每档拼一次完整键（map[string]T 的键查找绕不开），命中时复用同一串
+	// 作返回键——命中路径上的第二次拼接（旧实现拼了两次）就此消灭；
+	// method 也不再从 full 反推（TrimSuffix 侧的 ":"+prefix 拼接同样省掉）。
+	for i := strings.LastIndexByte(path, '/'); i > 0; i = strings.LastIndexByte(path[:i], '/') {
+		p := path[:i]
+		k := method + ":" + p
+		if v, ok := m[k]; ok {
+			return v, k, true
 		}
 		if v, ok := m[p]; ok {
 			return v, p, true
@@ -319,23 +333,4 @@ func lookupPolicyKey[T any](m map[string]T, full, prefix string) (T, string, boo
 	}
 	v, ok := m[""]
 	return v, "", ok
-}
-
-// segmentPrefixes 返回 s 按段分隔符 sep 切分的全部**真段前缀**（不含 s 自身
-// 与空串），从长到短：/order/123 → ["/order"]，com.example.svc →
-// ["com.example", "com"]。「段」边界是硬约束——/orders 不会为 /order 产生
-// 候选（分隔符必须落在段尾），com.examplex 也不会为 com.example 产生候选。
-// 起始分隔符（path 开头的 "/"）不算边界（i == 0 跳过），否则会产出 ""。
-func segmentPrefixes(s, sep string) []string {
-	var out []string
-	for i := 0; i < len(s); i++ {
-		if i > 0 && s[i] == sep[0] {
-			out = append(out, s[:i])
-		}
-	}
-	// 从长到短：候选按产生序是短→长，倒置后先试最具体的前缀。
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
 }

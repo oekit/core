@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -164,9 +165,17 @@ func (m *Manager) AddTeardown(fn func()) {
 // 之后、关资源之前」，阻塞式的 Listen 却没给调用方任何插入位置 ⇒ 按推荐
 // 用法接 Listen 的服务**永远不排空**。
 //
-// 排空时长由 SetDrainTimeout 控制（默认 30s）。排空期间再收到一个信号
+// 排空时长由 SetDrainTimeout 控制（默认 30s）。
+//
+// **第二枪语义覆盖两个阶段（core#142）**：① 排空期间再收到一个信号
 // （编排器连发两次 SIGTERM、运维连按两次 Ctrl-C）立即放弃等待并进入资源
-// 关闭——第二枪的语义就是「别等了，现在就关」。
+// 关闭——第二枪的语义就是「别等了，现在就关」；② **资源关闭执行期**再收到
+// 一个信号则强制中止关停：正在执行的 closer 收到 context 取消（能否立即
+// 返回取决于 closer 是否尊重 ctx），尚未开始的任务**全部跳过**并逐个记入
+// Errors()（"skipped, shutdown aborted by signal"），终态日志打
+// "shutdown aborted by signal"（与正常 "shutdown completed" 可区分）。
+// Go 无法硬中断运行中的 goroutine——第二枪给的是「取消 + 不再启动后续
+// 任务」，彻底卡死的 closer 仍需编排器 SIGKILL 兜底。
 func (m *Manager) Listen(signals ...os.Signal) {
 	if len(signals) == 0 {
 		signals = []os.Signal{os.Interrupt}
@@ -196,7 +205,54 @@ func (m *Manager) listenLoop(ch <-chan os.Signal) {
 	m.stopAccepting()
 	m.drainWithSignal(ch)
 
-	m.Shutdown(context.Background())
+	m.shutdownWithSignal(ch)
+}
+
+// shutdownWithSignal 在信号驱动路径上执行资源关闭（core#142）：关闭执行期
+// 再收到一个信号（第二枪）即强制中止——在跑的 closer 收到 ctx 取消（能否
+// 立即返回取决于 closer 是否尊重 ctx），尚未开始的任务全部跳过并记入
+// Errors()。公开的 Shutdown 语义不变（ctx 只传播取消、不跳任务）——
+// 第二枪中止是 Listen 信号编排的专属行为。
+// 并发语义与 Shutdown 一致：经 once 幂等，已有一次关停在跑/完成时本调用
+// no-op（此时不启动第二枪观察 goroutine）。
+func (m *Manager) shutdownWithSignal(abort <-chan os.Signal) {
+	m.once.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// 第二枪观察 goroutine：收到信号 → 取消 ctx（在飞 closer 经
+		// context.AfterFunc 同步收到取消）+ 关闭 aborted 旗标（任务间检查
+		// 跳过剩余任务）。
+		// AGENTS.md:30 豁免说明（core#150 同款口径）：core 引
+		// concurrency/async 会把本仓矩阵内依赖从 [pkg] 扩为 [concurrency,
+		// pkg]，牵动矩阵文档 wave 与地板联动，单点修复不做该扩展；改用
+		// 仓内 panic 收编单源 pkg/errors.Recovered 内联（dispatchLoop/
+		// runFunc/runCloser 同款）。体内无用户注入面（channel 读 + cancel），
+		// recover 是兜底护栏。
+		aborted := make(chan struct{})
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			defer func() {
+				if perr := pkgerrors.Recovered(recover()); perr != nil {
+					m.logger.Warn("shutdown signal watcher panicked (isolated)", logkey.Err, perr.Error())
+				}
+			}()
+			select {
+			case sig := <-abort:
+				m.logger.Warn("received signal during shutdown, aborting remaining close tasks", "signal", sig)
+				// 先关旗标再取消：aborted 关闭 → cancel → closer 观察到取消
+				// → 主循环回到任务间检查——这条 happens-before 链保证任何
+				// 「因取消而返回」的时点，跳过旗标已可见（反序则存在主循环
+				// 先于旗标关闭到达检查点的窗口，剩余任务会被误执行）。
+				close(aborted)
+				cancel()
+			case <-stop:
+			}
+		}()
+
+		m.runShutdown(ctx, aborted)
+	})
 }
 
 // stopAccepting 停止接受新请求（幂等）。
@@ -215,7 +271,21 @@ func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
 
 	drained := make(chan struct{})
 	go func() {
+		// AGENTS.md:30「禁止裸 go func」的注释豁免（core#150）：本仓矩阵内
+		// 依赖只有 pkg，引 concurrency/async.GoSafe 会把依赖面扩为
+		// [concurrency, pkg]（牵动矩阵总览表 doc wave 与地板联动），单点
+		// 修复不值当——改用仓内 panic 收编单源 pkg/errors.Recovered 内联
+		// （watcher.dispatchLoop / runFunc / runCloser 同款）。panic 面是
+		// 真实的：Drain → waitForRequests 会调用注入的 logSink（WithLogger
+		// 接受宿主实现，可 panic），关停路径被宿主 logger 打崩是最坏时机的
+		// 进程 abort。defer 顺序：recover 先注册后执行、close(drained) 最后
+		// 执行 ⇒ panic 也会唤醒 select 侧（排空视为已结束，继续关资源）。
 		defer close(drained)
+		defer func() {
+			if perr := pkgerrors.Recovered(recover()); perr != nil {
+				m.logger.Warn("drain goroutine panicked (isolated)", logkey.Err, perr.Error())
+			}
+		}()
 		m.Drain(ctx)
 	}()
 
@@ -238,55 +308,133 @@ func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
 // 关停执行期间经 Add / AddTeardown 新注册的任务同样会被补齐执行（收敛
 // 循环，core#116），不静默漏调——见 Add 的 godoc。
 // 多次调用是安全的，只有第一次调用会执行清理。
+//
+// 注意 ctx 的语义边界（core#142）：ctx 取消**不会**让剩余任务被跳过——
+// 它只中止当前正在执行的任务，后续任务照常补齐执行（与「收敛循环不漏调」
+// 的承诺一致）；「收到信号即跳过剩余任务」的强制语义只存在于信号驱动的
+// Listen 路径（见 Listen 第二枪语义）。
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.once.Do(func() {
-		// 1. 停止接受新请求（与 Acquire 互斥，确保不会有请求被漏算）
-		m.stopAccepting()
-		m.logger.Info("stopped accepting new requests")
-
-		// 2. 执行 teardowns —— 收敛循环（core#116）：每轮锁内取「尚未执行的
-		// 尾部增量」、锁外执行，直到一轮取空。此前是入口处一次性快照，
-		// 快照拷贝之后经 AddTeardown 追加的函数被静默漏调（零日志零错误）。
-		teardownDone := 0
-		for {
-			batch := pendingBatch(&m.mu, &m.teardowns, &teardownDone)
-			if len(batch) == 0 {
-				break
-			}
-			for _, fn := range batch {
-				if err := runFunc("teardown", fn); err != nil {
-					m.mu.Lock()
-					m.shutdownErrs = append(m.shutdownErrs, err)
-					m.mu.Unlock()
-					m.logger.Error("teardown failed", logkey.Err, err)
-				}
-			}
-		}
-
-		// 3. 执行 closer jobs —— 同款收敛循环：closer 执行期间经 Add 登记
-		// 的任务（nacos 延迟注册的反注册句柄）在下一轮被补齐执行，失败
-		// 与快照内任务同口径进 shutdownErrs。
-		jobsDone := 0
-		for {
-			batch := pendingBatch(&m.mu, &m.jobs, &jobsDone)
-			if len(batch) == 0 {
-				break
-			}
-			for _, j := range batch {
-				if err := m.runCloser(j, ctx); err != nil {
-					m.mu.Lock()
-					m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
-					m.mu.Unlock()
-					m.logger.Error("resource close failed", "resource", j.name, logkey.Err, err)
-				} else {
-					m.logger.Info("resource closed", "resource", j.name)
-				}
-			}
-		}
-
-		m.shutdownDone.Store(true)
-		m.logger.Info("shutdown completed")
+		m.runShutdown(ctx, nil)
 	})
+}
+
+// runShutdown 是 Shutdown 的实体（once 内执行）：收敛循环取任务、锁外执行
+// （core#116），任务间检查 aborted 旗标——Listen 路径的第二枪把 aborted
+// 关闭后（core#142），尚未开始的任务不再启动、逐个记为 skipped；nil
+// aborted（公开 Shutdown 路径）永不中止。
+func (m *Manager) runShutdown(ctx context.Context, aborted <-chan struct{}) {
+	// 1. 停止接受新请求（与 Acquire 互斥，确保不会有请求被漏算）
+	m.stopAccepting()
+	m.logger.Info("stopped accepting new requests")
+
+	// 两条收敛循环的游标提前到函数级：abortShutdown 需要把「未消费的剩余
+	// 任务」按同一游标口径记为 skipped（core#142）。
+	teardownDone, jobsDone := 0, 0
+
+	// 2. 执行 teardowns —— 收敛循环（core#116）：每轮锁内取「尚未执行的
+	// 尾部增量」、锁外执行，直到一轮取空。此前是入口处一次性快照，
+	// 快照拷贝之后经 AddTeardown 追加的函数被静默漏调（零日志零错误）。
+	for {
+		batch := pendingBatch(&m.mu, &m.teardowns, &teardownDone)
+		if len(batch) == 0 {
+			break
+		}
+		for idx, fn := range batch {
+			if abortRequested(aborted) {
+				// 游标回退：本批未执行的（idx 起）交由 abortShutdown 统一
+				// 记账为 skipped，不静默消失（core#142）。
+				teardownDone -= len(batch) - idx
+				m.abortShutdown(&teardownDone, &jobsDone)
+				return
+			}
+			if err := runFunc("teardown", fn); err != nil {
+				m.mu.Lock()
+				m.shutdownErrs = append(m.shutdownErrs, err)
+				m.mu.Unlock()
+				m.logger.Error("teardown failed", logkey.Err, err)
+			}
+		}
+	}
+
+	// 3. 执行 closer jobs —— 同款收敛循环：closer 执行期间经 Add 登记
+	// 的任务（nacos 延迟注册的反注册句柄）在下一轮被补齐执行，失败
+	// 与快照内任务同口径进 shutdownErrs。
+	for {
+		batch := pendingBatch(&m.mu, &m.jobs, &jobsDone)
+		if len(batch) == 0 {
+			break
+		}
+		for idx, j := range batch {
+			if abortRequested(aborted) {
+				jobsDone -= len(batch) - idx
+				m.abortShutdown(&teardownDone, &jobsDone)
+				return
+			}
+			if err := m.runCloser(j, ctx); err != nil {
+				m.mu.Lock()
+				m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
+				m.mu.Unlock()
+				m.logger.Error("resource close failed", "resource", j.name, logkey.Err, err)
+			} else {
+				m.logger.Info("resource closed", "resource", j.name)
+			}
+		}
+	}
+
+	m.shutdownDone.Store(true)
+	m.logger.Info("shutdown completed")
+}
+
+// abortRequested 非阻塞探测第二枪（core#142）。nil 通道 = 公开 Shutdown
+// 路径，永不中止。
+func abortRequested(aborted <-chan struct{}) bool {
+	if aborted == nil {
+		return false
+	}
+	select {
+	case <-aborted:
+		return true
+	default:
+		return false
+	}
+}
+
+// abortShutdown 把被第二枪跳过的剩余任务逐个记账（core#142）：跳过不是
+// 静默的——每条进 Errors()（"skipped, shutdown aborted by signal"）并打
+// Warn，运维从关停报告能看出哪些资源没关成、需要 SIGKILL 后补。收尾
+// shutdownDone 置位（本次关停已收敛：不会再有任务执行，后续 Shutdown
+// 调用 no-op），终态日志 "shutdown aborted by signal" 与正常
+// "shutdown completed" 可区分。
+func (m *Manager) abortShutdown(teardownDone, jobsDone *int) {
+	for {
+		batch := pendingBatch(&m.mu, &m.teardowns, teardownDone)
+		if len(batch) == 0 {
+			break
+		}
+		for range batch {
+			err := errors.New("teardown skipped: shutdown aborted by signal")
+			m.mu.Lock()
+			m.shutdownErrs = append(m.shutdownErrs, err)
+			m.mu.Unlock()
+			m.logger.Warn("teardown skipped by shutdown abort")
+		}
+	}
+	for {
+		batch := pendingBatch(&m.mu, &m.jobs, jobsDone)
+		if len(batch) == 0 {
+			break
+		}
+		for _, j := range batch {
+			err := fmt.Errorf("%s: skipped, shutdown aborted by signal", j.name)
+			m.mu.Lock()
+			m.shutdownErrs = append(m.shutdownErrs, err)
+			m.mu.Unlock()
+			m.logger.Warn("resource close skipped by shutdown abort", "resource", j.name)
+		}
+	}
+	m.shutdownDone.Store(true)
+	m.logger.Warn("shutdown aborted by signal")
 }
 
 // pendingBatch 取「*src 中尚未消费的尾部增量」快照并推进 done 游标，锁内
@@ -415,8 +563,9 @@ func (m *Manager) waitForRequests(ctx context.Context) {
 	}
 }
 
-// Errors 返回 Shutdown 过程中收集的错误：teardown 失败（含 panic）与
-// closer job 失败（返回 error 或 panic），按发生顺序排列。
+// Errors 返回 Shutdown 过程中收集的错误：teardown 失败（含 panic）、
+// closer job 失败（返回 error 或 panic）与被 Listen 第二枪跳过的剩余任务
+// （"skipped, shutdown aborted by signal"，core#142），按发生顺序排列。
 // 不会触发 Shutdown；如需触发请显式调用 Shutdown。
 // 返回的是副本，调用方修改不影响内部状态。
 func (m *Manager) Errors() []error {
