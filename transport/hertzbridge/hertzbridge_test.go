@@ -178,3 +178,101 @@ func TestEmptyHeaderValues(t *testing.T) {
 		t.Fatalf("空表 Keys 应为空: %v", ks)
 	}
 }
+
+// —— #154：reply Get 的 Set-Cookie blob 面 ——
+
+// TestReplyHeader_SetCookieGetFirstValue 钉住 #154 治本：响应侧每枚
+// Set-Cookie 是独立头行，Get 返回**第一枚**（根包契约「Get=第一个值」），
+// 不是 hertz peek 的 "; " 连接 blob——blob 与单枚 cookie 的属性序列无法
+// 区分，消费方按「取第一个 cookie」解析必错。Values 逐枚、Del 清全部。
+// 对照面：请求侧 Cookie 是 RFC 6265 单头文法，Get 返回合并串语义正确。
+func TestReplyHeader_SetCookieGetFirstValue(t *testing.T) {
+	h := &protocol.ResponseHeader{}
+	h.Add("Set-Cookie", "a=1; path=/")
+	h.Add("Set-Cookie", "b=2; path=/")
+	reply := NewReplyHeader(h)
+
+	if got := reply.Get("set-cookie"); got != "a=1; path=/" {
+		t.Fatalf("★ reply Get(Set-Cookie) 应返回第一枚 cookie（#154，此前是合并 blob）: %q", got)
+	}
+	if vs := reply.Values("Set-Cookie"); len(vs) != 2 || vs[0] != "a=1; path=/" || vs[1] != "b=2; path=/" {
+		t.Fatalf("Values 应逐枚返回 cookie: %v", vs)
+	}
+
+	// Del 经 EqualFold 收口：清全部 cookie（hertz del 的 Set-Cookie 特例）。
+	reply.Del("SET-COOKIE")
+	if vs := reply.Values("Set-Cookie"); len(vs) != 0 {
+		t.Fatalf("Del(Set-Cookie) 应清空全部 cookie: %v", vs)
+	}
+	if got := reply.Get("Set-Cookie"); got != "" {
+		t.Fatalf("Del 后 Get 应为空: %q", got)
+	}
+
+	// 对照面：请求侧 Cookie 单头文法，Get=合并串语义正确（不在 #154 内）。
+	rh := &protocol.RequestHeader{}
+	rh.Set("Cookie", "a=1; b=2")
+	if got := NewRequestHeader(rh).Get("cookie"); got != "a=1; b=2" {
+		t.Fatalf("请求侧 Cookie 合并文法不得被破坏: %q", got)
+	}
+}
+
+// —— #155：EqualFold 承诺不依赖 hertz 键规范化开关 ——
+
+// TestEqualFoldUnderDisableNormalizing 钉住 #155 兑现路线：hertz 的键规范化
+// 可被 DisableNormalizing()（server.WithDisableHeaderNamesNormalizing(true)
+// 的逐请求等价面）关闭，关闭后 hertz 自身 Get/Del 退化为大小写敏感——本
+// 适配器经 VisitAll 自行匹配，Get/Values/Del 的 EqualFold 承诺在
+// normalize-on/off 两种形态下都成立（#163 病灶「Get 命中而 Values 落空」的
+// 镜像复发被结构性关死）。
+func TestEqualFoldUnderDisableNormalizing(t *testing.T) {
+	// 请求侧：两枚大小写变体键。
+	h := &protocol.RequestHeader{}
+	h.DisableNormalizing()
+	h.Add("x-trace-id", "v1")
+	h.Add("X-Trace-Id", "v2")
+	req := NewRequestHeader(h)
+
+	if got := req.Get("X-TRACE-ID"); got != "v1" {
+		t.Fatalf("★ normalize-off 下 Get 仍须 EqualFold 命中首值（#155）: %q", got)
+	}
+	if vs := req.Values("X-Trace-Id"); len(vs) != 2 || vs[0] != "v1" || vs[1] != "v2" {
+		t.Fatalf("normalize-off 下 Values 仍须命中全部变体: %v", vs)
+	}
+	req.Del("X-TRACE-ID")
+	if vs := req.Values("x-trace-id"); len(vs) != 0 {
+		t.Fatalf("★ normalize-off 下 Del 须删净全部大小写变体（#155 探针的 Del 缺口）: %v", vs)
+	}
+	if got := req.Get("X-Trace-Id"); got != "" {
+		t.Fatalf("Del 后 Get 应为空: %q", got)
+	}
+
+	// 响应侧同契约。
+	rh := &protocol.ResponseHeader{}
+	rh.DisableNormalizing()
+	rh.Add("x-request-id", "r1")
+	reply := NewReplyHeader(rh)
+	if got := reply.Get("X-REQUEST-ID"); got != "r1" {
+		t.Fatalf("★ reply normalize-off 下 Get EqualFold 失效: %q", got)
+	}
+	reply.Del("x-REQUEST-id")
+	if vs := reply.Values("X-Request-Id"); len(vs) != 0 {
+		t.Fatalf("★ reply normalize-off 下 Del 变体删不净: %v", vs)
+	}
+}
+
+// —— #156：Endpoint = 请求面 Host（客户端可控） ——
+
+// TestEndpointHostUntrustedInput 钉住 #156 的不可信输入语义：请求携带的
+// Host（含恶意值）会原样成为 Endpoint——契约文档已分层标注「请求寻址信息，
+// 不得用于安全判定/ACL」，本测试把该语义钉进行为面，防止后续实现悄悄
+// 变成「看似可信」的来源。
+func TestEndpointHostUntrustedInput(t *testing.T) {
+	c := app.NewContext(1)
+	c.Request.Reset()
+	c.Request.SetRequestURI("/x")
+	c.Request.URI().SetHost("evil.com:8080") // 客户端可控的寻址输入
+	tr := NewServerTransport(c)
+	if got := tr.Endpoint(); got != "evil.com:8080" {
+		t.Fatalf("★ Endpoint 应为请求面 Host（不可信输入原样流出，#156）: %q", got)
+	}
+}
