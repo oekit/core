@@ -228,11 +228,18 @@ func keysFromVisitAll(visitAll func(fn func(k, v []byte))) []string {
 
 // firstFoldMatch 返回首个 EqualFold 命中的值，未命中空串（Get 的实现基座，
 // #154/#155：Get=首值 + 大小写不敏感，不依赖 hertz 规范化开关）。
+// 命中判定用独立 found 标志而非 out==""：首枚命中值为空串时仍是「首值」，
+// 不得让位给后续命中（core#164 空值穿透）。
 func firstFoldMatch(visitAll func(fn func(k, v []byte)), key string) string {
 	var out string
+	found := false
 	visitAll(func(k, v []byte) {
-		if out == "" && strings.EqualFold(string(k), key) {
+		if found {
+			return
+		}
+		if strings.EqualFold(string(k), key) {
 			out = string(v)
+			found = true
 		}
 	})
 	return out
