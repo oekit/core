@@ -72,10 +72,20 @@ func (o *overlaySource) Watch(ctx context.Context, onChange func()) {
 					// 缺省出口与 chain.Timeout 的迟到 panic 同形态：不留痕
 					// 的 recover 等于把故障藏起来，排障时只剩「配置不热更」
 					// 一个假象，真实肇因（消费方回调 / 子源实现）埋在栈底。
-					slog.Default().With("component", "config-overlay").Error(
-						"[panic] OverlaySource 子源 Watch / onChange 回调 panic（已收编，进程不受影响）",
-						"panic", r,
-						"stack", string(debug.Stack()),
+					stack := string(debug.Stack())
+					// 收编出口自身防 panic（core#157，logRecovered 单源）：
+					// slog.Default 在这条恢复路径上再 panic（宿主 SetDefault
+					// 进了同款故障 handler）不能打死子源监听 goroutine——
+					// 「其余子源继续」的承诺不再隐含「logger 不 panic」前提。
+					logRecovered(
+						fmt.Sprintf("config-overlay: 子源 Watch/onChange panic %v\n%s", r, stack),
+						func() {
+							slog.Default().With("component", "config-overlay").Error(
+								"[panic] OverlaySource 子源 Watch / onChange 回调 panic（已收编，进程不受影响）",
+								"panic", r,
+								"stack", stack,
+							)
+						},
 					)
 				}
 			}()
