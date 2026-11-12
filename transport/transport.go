@@ -44,8 +44,11 @@ type Header interface {
 type Transporter interface {
 	// Kind 传输类型（http/grpc）。
 	Kind() Kind
-	// Endpoint 服务端为监听地址（如 http://127.0.0.1:8000），
-	// 客户端为发现目标（如 discovery:///my-service）。
+	// Endpoint 服务端为请求寻址信息（hertz 实现返回请求 Host——客户端可控的
+	// 请求面输入，任意 Host 头值会原样流出，不得用于安全判定/ACL/本机地址
+	// 推断；「监听地址」语义需服务方注入自身信息，RequestContext 拿不到，
+	// #156；各适配层具体来源见其 godoc），客户端为发现目标（如
+	// discovery:///my-service）。
 	Endpoint() string
 	// Operation 全方法选择器：http 为请求 PATH，grpc 为 /pkg.Service/Method。
 	Operation() string
