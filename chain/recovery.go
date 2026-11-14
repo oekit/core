@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"errors"
 	"context"
 	"fmt"
 	"runtime/debug"
@@ -78,7 +79,11 @@ func Recovery(opts ...RecoveryOption) Middleware {
 			// 下游以 *PanicError **形式返回**（例如下游中间的 Timeout 已把 panic
 			// 收编成错误再往上抛）⇒ 同样走上报钩子，与「直接 panic」的路径
 			// 口径一致（否则这类 panic 不会出现在 Sentry 等上报里）。
-			if pe, ok := err.(*PanicError); ok && cfg.reporter != nil {
+			// core#194：errors.As 而非精确断言——被任何中间件 %w 包装后
+			// （Timeout 收编再 wrap、日志再包一层）精确断言静默失效，
+			// 上报钩子漏掉这类 panic。
+			var pe *PanicError
+			if errors.As(err, &pe) && cfg.reporter != nil {
 				reportIsolated(func() { cfg.reporter(ctx, req, *pe) })
 			}
 			return resp, err
