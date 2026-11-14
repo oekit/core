@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 )
