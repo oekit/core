@@ -169,22 +169,38 @@ func NewStore(cfg *Config) *Store {
 
 // Load 返回当前配置快照(不可变;消费方不得修改,发布方也改不到——
 // Update 入库前深拷贝,发布方复用/改写入参不影响已发布快照)。
-func (s *Store) Load() *Config { return s.cell.Load().val }
+//
+// 零值 Store 可用(core#193):返回空配置——零值嵌入(`var gov Store` /
+// `type S struct{ gov Store }`)不再在首个请求上 nil 解引用;与
+// NewStore(nil) 的「nil 合法,视为空配置」语义一致。
+func (s *Store) Load() *Config {
+	if c := s.cell.Load(); c != nil {
+		return c.val
+	}
+	return &Config{}
+}
 
 // Version 返回配置版本号(每次 Update +1),消费方可据此判断是否变化。
 // 版本是发布单元的投影(与值同一次原子替换),因此「看到新值」必然
 // 「看到新版本」;Load() 与 Version() 两次调用之间若插进一次 Update,
 // 版本只会**偏新**不会偏旧——最多多重建一次派生状态,不会漏判
 // (core#79)。要一次拿到一致的一对请用 LoadVersion。
-func (s *Store) Version() int64 { return s.cell.Load().gen }
+func (s *Store) Version() int64 {
+	if c := s.cell.Load(); c != nil {
+		return c.gen
+	}
+	return 0
+}
 
 // LoadVersion 一次返回一致的一对:当前配置与它的版本号。需要「拿到值的
 // 同时知道它是第几代」(典型:据此决定派生状态要不要重建)时用它,而不是
 // Load() + Version() 两次调用——两次调用之间可能插进一次 Update,拿到的
 // 值与版本来自不同代。
 func (s *Store) LoadVersion() (*Config, int64) {
-	c := s.cell.Load()
-	return c.val, c.gen
+	if c := s.cell.Load(); c != nil {
+		return c.val, c.gen
+	}
+	return &Config{}, 0
 }
 
 // Update 原子替换配置(nil 合法,等价空配置)并递增版本。
@@ -204,7 +220,12 @@ func (s *Store) Update(cfg *Config) {
 	next := &storeCell{val: deepCopyConfig(cfg)}
 	for {
 		cur := s.cell.Load()
-		next.gen = cur.gen + 1
+		if cur == nil {
+			// 零值 Store 首次 Update(core#193):nil 单元视作 gen 0
+			next.gen = 1
+		} else {
+			next.gen = cur.gen + 1
+		}
 		if s.cell.CompareAndSwap(cur, next) {
 			return
 		}

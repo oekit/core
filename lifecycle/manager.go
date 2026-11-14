@@ -104,8 +104,21 @@ func (m *Manager) Acquire() bool {
 
 // Release 释放请求许可。
 // 在请求处理完成后调用。
+//
+// 幂等护栏（core#190）：refCount 已归零后再调用（重复 Release / 未配对的
+// 释放）不把计数推成负数——负数会让 waitForRequests 的 `<=0` 判据把
+// 「在飞请求仍在跑」误判成「已全部排空」，Drain 提前返回、Shutdown 收尾
+// 早于真实静止。CAS 循环保证并发释放下也不越界。
 func (m *Manager) Release() {
-	m.refCount.Add(-1)
+	for {
+		cur := m.refCount.Load()
+		if cur <= 0 {
+			return
+		}
+		if m.refCount.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
 }
 
 // GetRefCount 获取当前进行中的请求数（用于监控）。
@@ -314,6 +327,11 @@ func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
 // 的承诺一致）；「收到信号即跳过剩余任务」的强制语义只存在于信号驱动的
 // Listen 路径（见 Listen 第二枪语义）。
 func (m *Manager) Shutdown(ctx context.Context) {
+	if ctx == nil {
+		// core#191：nil ctx = Background（#159 全仓口径）——nil 进
+		// ctx.Done() 直接解引用 panic。
+		ctx = context.Background()
+	}
 	m.once.Do(func() {
 		m.runShutdown(ctx, nil)
 	})
@@ -520,6 +538,10 @@ func (m *Manager) SetDrainTimeout(d time.Duration) {
 // Drain → Shutdown），无需手工再调；只有自己编排关闭流程（如自己接管
 // signal.Notify）时才需要显式调用本方法。
 func (m *Manager) Drain(ctx context.Context) {
+	if ctx == nil {
+		// core#191：nil ctx = Background（#159 全仓口径）。
+		ctx = context.Background()
+	}
 	m.waitForRequests(ctx)
 }
 

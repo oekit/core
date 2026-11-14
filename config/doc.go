@@ -43,10 +43,14 @@
 // “field X not found in type Y”。
 //
 // `${VAR}` 展开是 YAML 解码前的**纯文本替换**，不感知标量上下文：值含换行
-// 会被折叠为空格、含 `#` 会被当注释截断。为避免「解析成功但值已损坏」的
-// 静默失败，这类值一律拒载（fail-closed，错误信息带变量名）——多行证书、
-// 含注释符的 token 请改经 ApplyEnvOverlay（结构体级 env 注入，无文本上下文
-// 问题）传入（core#59）。
+// 会被折叠为空格、含 `#` 会被当注释截断、含反斜杠（`\`）会在双引号标量里
+// 被 YAML 二次解释转义（`\n` 变真换行，core#83——Windows 路径 `C:\data`、
+// 正则、密钥常含 `\`，无引号/单引号标量也一并拒载，无法感知标量上下文）。
+// 为避免「解析成功但值已损坏」的静默失败，这**四类**值一律拒载
+// （fail-closed，错误信息带变量名/形态）——多行证书、含注释符或反斜杠的
+// token 请改经 ApplyEnvOverlay（结构体级 env 注入，无文本上下文问题）
+// 传入（core#59；本清单与 expandEnv godoc/loader.go 的拦截分支同源，
+// core#195 补齐第四类）。
 //
 // # Struct Tag 增强（default/env/range/options/require）
 //
