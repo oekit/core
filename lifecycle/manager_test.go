@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -14,12 +15,15 @@ func TestReleaseNotNegativeAndNilCtx(t *testing.T) {
 	if got := m.refCount.Load(); got != 0 {
 		t.Fatalf("refCount = %d, want 0(不推负)", got)
 	}
+	// nil ctx 是被测语义（core#191）；经变量传入避开 staticcheck SA1012
+	// 对字面 nil 的告警。
+	var nilCtx context.Context
 	done := make(chan struct{})
-	go func() { m.Shutdown(nil); close(done) }()
+	go func() { m.Shutdown(nilCtx); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Shutdown(nil) 未返回(nil ctx 应按 Background)")
 	}
-	m.Drain(nil) // 不 panic
+	m.Drain(nilCtx) // 不 panic
 }
