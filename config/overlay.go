@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"reflect"
 	"runtime/debug"
+	"strconv"
 )
 
 // OverlaySource 把多个 ConfigSource 组合为一个：
@@ -224,11 +225,15 @@ func growOverlaySlices(overlay, dst reflect.Value, path string, grown *[]grownSl
 			of.Set(g)
 			// #187 缺口一：元素内部可能还有切片字段（[]struct 下沉第二层），
 			// 铺完一层就停 ⇒ *struct 元素里的切片与切片元素内部的切片都不铺。
+			// 元素路径用**带下标**的 Go 路径（"Mids[0]"）：walkTaggedStruct 与
+			// 回缩判据 hasElementExplicit 的前缀匹配都以 "X[0].Y" 形态记录元素
+			// 命中——不带下标的 "Mids.Leaves" 永远前缀不上 ⇒ 内层切片被误回缩。
 			for j := range df.Len() {
+				epath := fpath + "[" + strconv.Itoa(j) + "]"
 				if isStruct {
-					growOverlaySlices(g.Index(j), df.Index(j), fpath, grown)
+					growOverlaySlices(g.Index(j), df.Index(j), epath, grown)
 				} else if de := df.Index(j); !de.IsNil() {
-					growOverlaySlices(g.Index(j).Elem(), de.Elem(), fpath, grown)
+					growOverlaySlices(g.Index(j).Elem(), de.Elem(), epath, grown)
 				}
 			}
 			*grown = append(*grown, grownSliceRef{path: fpath, val: of})
