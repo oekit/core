@@ -1,5 +1,9 @@
 
 
+## [v0.15.3] — 2026-11-14
+
+- fix(config): growOverlaySlices 两处缺口——切片元素内部切片递归铺开 + *struct nil 按需分配下探(#187);OverlayMerge interface 走深拷贝,动态值不再别名污染(#189)(#188 同题重报已归一)
+
 ## [v0.15.2] — 2026-11-13
 
 - fix(hertzbridge): firstFoldMatch 空值穿透——多值头首枚为空串时 Get 返回首个非空值，违反「Get=首值」契约（#164）。命中判定改独立 found 标志；godoc 补空首值不让位说明；补多值含空串回归测试（Get/Values/Keys 三方对齐）。pkg 地板 v0.47.1。
