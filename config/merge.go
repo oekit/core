@@ -211,7 +211,14 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet, envOv
 			}
 		default:
 			if forced || zeroForce || !srcField.IsZero() {
-				dstField.Set(srcField)
+				if srcField.Kind() == reflect.Interface && !srcField.IsNil() {
+					// #189：interface 裸 Set 只拷接口头——动态值（map/slice
+					// 装进 any）仍是同一份，改 dst 元素反向污染 src；深拷贝
+					// 与 slice/map 分支同口径。
+					dstField.Set(deepCopyValue(srcField))
+				} else {
+					dstField.Set(srcField)
+				}
 			}
 		}
 	}
