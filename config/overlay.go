@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"runtime/debug"
 	"strconv"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // OverlaySource 把多个 ConfigSource 组合为一个：
@@ -39,14 +41,14 @@ func (o *overlaySource) Read() ([]byte, error) {
 	for i, src := range o.srcs {
 		data, err := src.Read()
 		if err != nil {
-			return nil, fmt.Errorf("overlay source[%d]: %w", i, err)
+			return nil, pkgerrors.Wrapf(err, "overlay source[%d]", i)
 		}
 		if len(data) == 0 {
 			continue
 		}
 		var m map[string]any
 		if err := json.Unmarshal(data, &m); err != nil {
-			return nil, fmt.Errorf("overlay source[%d]: decode json: %w", i, err)
+			return nil, pkgerrors.Wrapf(err, "overlay source[%d]: decode json", i)
 		}
 		merged = deepMergeMaps(merged, m)
 	}
@@ -55,7 +57,7 @@ func (o *overlaySource) Read() ([]byte, error) {
 	}
 	out, err := json.Marshal(merged)
 	if err != nil {
-		return nil, fmt.Errorf("overlay: encode merged json: %w", err)
+		return nil, pkgerrors.Wrapf(err, "overlay: encode merged json")
 	}
 	return out, nil
 }
