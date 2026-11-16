@@ -1,5 +1,9 @@
 
 
+## [v0.15.4] — 2026-11-16
+
+- refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至 pkg v0.52.0。文案逐字节同形（测试断言零修改），多 %w/%w 居中/哨兵前置形态按仓规保留
+
 ## [v0.15.3] — 2026-11-14
 
 - fix(config): growOverlaySlices 两处缺口——切片元素内部切片递归铺开 + *struct nil 按需分配下探(#187);OverlayMerge interface 走深拷贝,动态值不再别名污染(#189)(#188 同题重报已归一)
