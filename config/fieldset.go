@@ -7,6 +7,8 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // FieldSet 记录结构体字段是否被**显式提供**（YAML 里出现过对应 key，或 env tag
@@ -128,7 +130,7 @@ func FieldSetFromYAML(v any, data []byte) (FieldSet, error) {
 	}
 	var root any
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("config: FieldSetFromYAML: parse yaml: %w", err)
+		return nil, pkgerrors.Wrapf(err, "config: FieldSetFromYAML: parse yaml")
 	}
 	markSetFromYAML(rv, root, "", set)
 	return set, nil

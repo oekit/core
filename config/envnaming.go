@@ -1,12 +1,12 @@
 package config
 
 import (
-	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
 
 	pkgconfig "github.com/oekit/pkg/config"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // EnvNaming 描述 **env 变量名**的命名策略：全局前缀 + 逐字段覆盖。
@@ -211,14 +211,14 @@ func derivedPathEnvName(yamlPath string) string {
 // 所以在 ValidateTags 阶段 fail-closed，而不是等到运行期才发现「配了没生效」。
 func checkEnvNaming(n EnvNaming) error {
 	if n.Prefix != "" && !envPrefixPattern.MatchString(n.Prefix) {
-		return fmt.Errorf("env prefix %q contains invalid characters (only [A-Za-z0-9_] allowed)", n.Prefix)
+		return pkgerrors.Newf("env prefix %q contains invalid characters (only [A-Za-z0-9_] allowed)", n.Prefix)
 	}
 	for path, name := range n.Overrides {
 		if name == "" {
 			continue // 显式不走 env
 		}
 		if !envNamePattern.MatchString(name) {
-			return fmt.Errorf("env override %q: name %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, name)
+			return pkgerrors.Newf("env override %q: name %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, name)
 		}
 	}
 	return nil

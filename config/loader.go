@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // envPattern matches ${VAR} or ${VAR:default} placeholders.
@@ -36,7 +38,7 @@ func expandEnv(data []byte) ([]byte, error) {
 		if val, ok := os.LookupEnv(key); ok {
 			if snippet, reason := yamlCorruptingSequence(val); snippet != "" {
 				if expandErr == nil {
-					expandErr = fmt.Errorf("expand ${%s}: env value contains %s — %s; refusing to load a silently corrupted config value, inject it via ApplyEnvOverlay instead", key, snippet, reason)
+					expandErr = pkgerrors.Newf("expand ${%s}: env value contains %s — %s; refusing to load a silently corrupted config value, inject it via ApplyEnvOverlay instead", key, snippet, reason)
 				}
 				return match // 报错即中止加载，占位符保留与否不影响结果
 			}
@@ -191,13 +193,13 @@ func wrapEnvParseError(original, expanded []byte, err error) error {
 func wrapFileError(path string, err error) error {
 	var pe *parseErr
 	if errors.As(err, &pe) {
-		return fmt.Errorf("parse config file %s: %w", path, pe)
+		return pkgerrors.Wrapf(pe, "parse config file %s", path)
 	}
 	var te *tagErr
 	if errors.As(err, &te) {
-		return fmt.Errorf("apply struct tags for config file %s: %w", path, te)
+		return pkgerrors.Wrapf(te, "apply struct tags for config file %s", path)
 	}
-	return fmt.Errorf("parse config file %s: %w", path, err)
+	return pkgerrors.Wrapf(err, "parse config file %s", path)
 }
 
 // wrapByteError 给解码错误补上字节级上下文（无路径）。透传整个分类载体，
@@ -205,11 +207,11 @@ func wrapFileError(path string, err error) error {
 func wrapByteError(err error) error {
 	var pe *parseErr
 	if errors.As(err, &pe) {
-		return fmt.Errorf("parse config: %w", pe)
+		return pkgerrors.Wrapf(pe, "parse config")
 	}
 	var te *tagErr
 	if errors.As(err, &te) {
-		return fmt.Errorf("apply struct tags: %w", te)
+		return pkgerrors.Wrapf(te, "apply struct tags")
 	}
 	return err
 }
@@ -242,7 +244,7 @@ func Unmarshal(data []byte, dst any, opts ...LoadOption) error {
 func LoadFile(path string, dst any, opts ...LoadOption) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read config file %s: %w", path, err)
+		return pkgerrors.Wrapf(err, "read config file %s", path)
 	}
 	if err := unmarshalInto(data, dst, newLoadOptions(opts)); err != nil {
 		return wrapFileError(path, err)
@@ -277,7 +279,7 @@ func LoadBootstrap[T any](envFlag string, opts ...LoadOption) (*T, error) {
 		filename = fmt.Sprintf("etc/config-%s.yaml", envFlag)
 		data, err = os.ReadFile(filename)
 		if err != nil {
-			return nil, fmt.Errorf("read config file etc/config.yaml or %s: %w", filename, err)
+			return nil, pkgerrors.Wrapf(err, "read config file etc/config.yaml or %s", filename)
 		}
 	}
 
