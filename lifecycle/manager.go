@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -391,7 +390,7 @@ func (m *Manager) runShutdown(ctx context.Context, aborted <-chan struct{}) {
 			}
 			if err := m.runCloser(j, ctx); err != nil {
 				m.mu.Lock()
-				m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
+				m.shutdownErrs = append(m.shutdownErrs, pkgerrors.Wrapf(err, "%s", j.name))
 				m.mu.Unlock()
 				m.logger.Error("resource close failed", "resource", j.name, logkey.Err, err)
 			} else {
@@ -444,7 +443,7 @@ func (m *Manager) abortShutdown(teardownDone, jobsDone *int) {
 			break
 		}
 		for _, j := range batch {
-			err := fmt.Errorf("%s: skipped, shutdown aborted by signal", j.name)
+			err := pkgerrors.Newf("%s: skipped, shutdown aborted by signal", j.name)
 			m.mu.Lock()
 			m.shutdownErrs = append(m.shutdownErrs, err)
 			m.mu.Unlock()
@@ -485,7 +484,7 @@ func pendingBatch[T any](mu *sync.Mutex, src *[]T, done *int) []T {
 func runFunc(name string, fn func()) (err error) {
 	defer func() {
 		if perr := pkgerrors.Recovered(recover()); perr != nil {
-			err = fmt.Errorf("%s: %w", name, perr)
+			err = pkgerrors.Wrapf(perr, "%s", name)
 		}
 	}()
 	fn()
@@ -497,7 +496,7 @@ func runFunc(name string, fn func()) (err error) {
 func (m *Manager) runCloser(j job, parent context.Context) (err error) {
 	defer func() {
 		if perr := pkgerrors.Recovered(recover()); perr != nil {
-			err = fmt.Errorf("%s: %w", j.name, perr)
+			err = pkgerrors.Wrapf(perr, "%s", j.name)
 		}
 	}()
 
