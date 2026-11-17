@@ -1,5 +1,11 @@
 
 
+## [v0.16.0] — 2026-11-18
+
+- chain.PanicError 补 Unwrap——panic(err) 业务错误身份透传,errors.Is/As 可穿透(#381 同纪律,#207)
+
+关联问题单：core#207。
+
 ## [v0.15.4] — 2026-11-16
 
 - refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至 pkg v0.52.0。文案逐字节同形（测试断言零修改），多 %w/%w 居中/哨兵前置形态按仓规保留
