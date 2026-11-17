@@ -17,6 +17,26 @@ type PanicError struct {
 
 func (e *PanicError) Error() string { return fmt.Sprintf("panic: %v", e.Value) }
 
+// Unwrap 返回 panic 值中的 error（panic 值不是 error 时返回 nil）。
+//
+// 这是「error 身份不丢」的机制所在（#207）：业务侧 handler 常以
+// panic(err) 表达不可恢复错误（err 往往是业务哨兵），经 Recovery /
+// Timeout 收编成 *PanicError 后，没有 Unwrap 就等于把 error 拍平成
+// 纯文本——调用方 errors.Is(err, ErrX) / errors.As 全部失效。
+// 补上后 errors.Is / errors.As 可穿透 *PanicError 直达原始错误，
+// handler panic(哨兵) 与 return 哨兵在调用方判定上等价。
+//
+// 纪律与 pkg/errors.PanicError 的 Unwrap 同源（#381 panic→error 收编
+// 战役：panic 值是 error 时身份必须透传）；形态差异仅指本包
+// stdlib-only、不能引 pkg/errors 复用其实现，**不是**丢身份的借口——
+// 故此处以一行 Unwrap 对齐同一契约。
+func (e *PanicError) Unwrap() error {
+	if err, ok := e.Value.(error); ok {
+		return err
+	}
+	return nil
+}
+
 // RecoveryOption 配置 Recovery 中间件。
 type RecoveryOption func(*recoveryConfig)
 
