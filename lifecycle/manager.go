@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oekit/core/internal/logkey"
+	"github.com/oekit/pkg/contextx"
 	pkgerrors "github.com/oekit/pkg/errors"
 )
 
@@ -326,11 +327,9 @@ func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
 // 的承诺一致）；「收到信号即跳过剩余任务」的强制语义只存在于信号驱动的
 // Listen 路径（见 Listen 第二枪语义）。
 func (m *Manager) Shutdown(ctx context.Context) {
-	if ctx == nil {
-		// core#191：nil ctx = Background（#159 全仓口径）——nil 进
-		// ctx.Done() 直接解引用 panic。
-		ctx = context.Background()
-	}
+	// core#191：nil ctx = Background（#159 全仓口径，单源收敛到
+	// pkg/contextx.OrBackground）——nil 进 ctx.Done() 直接解引用 panic。
+	ctx = contextx.OrBackground(ctx)
 	m.once.Do(func() {
 		m.runShutdown(ctx, nil)
 	})
@@ -537,10 +536,9 @@ func (m *Manager) SetDrainTimeout(d time.Duration) {
 // Drain → Shutdown），无需手工再调；只有自己编排关闭流程（如自己接管
 // signal.Notify）时才需要显式调用本方法。
 func (m *Manager) Drain(ctx context.Context) {
-	if ctx == nil {
-		// core#191：nil ctx = Background（#159 全仓口径）。
-		ctx = context.Background()
-	}
+	// core#191：nil ctx = Background（#159 全仓口径，单源收敛到
+	// pkg/contextx.OrBackground）。
+	ctx = contextx.OrBackground(ctx)
 	m.waitForRequests(ctx)
 }
 

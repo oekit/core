@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/oekit/pkg/contextx"
 	pkgerrors "github.com/oekit/pkg/errors"
 )
 
@@ -213,9 +214,8 @@ type ProbeRequest struct {
 // 禁用——四类终态与分流规则见类型文档「返回值契约」。nil ctx 按 Background
 // 处理（core#159 全仓口径）。
 func (p *ReadyProbe) Run(ctx context.Context, req ProbeRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	// 口径单源：pkg/contextx.OrBackground（core#159：nil = Background）。
+	ctx = contextx.OrBackground(ctx)
 	if p.Disabled() {
 		// 禁用是彻底禁用（#129/#146）：在 Target 之前返回——Target 不被调用，
 		// dial 循环不可达，即使探活目标可建连也不碰。
