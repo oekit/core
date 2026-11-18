@@ -1,5 +1,11 @@
 
 
+## [v0.17.0] — 2026-11-18
+
+- lifecycle 新增 ReadyProbe 就绪探活机制——hertz/kitex RunServer 探活骨架(5s 超时/500ms dial/100ms 重试/ErrProbeAborted #48)下沉单源,hertz/kitex 消费联动跟进(#208);config.Snapshot 与 governance.Store 内部 cell 换 container.VersionedCell 薄包装,值+代次原子发布机制单源 pkg#535(行为不变)
+
+关联问题单：core#208。
+
 ## [v0.16.0] — 2026-11-18
 
 - chain.PanicError 补 Unwrap——panic(err) 业务错误身份透传,errors.Is/As 可穿透(#381 同纪律,#207)
