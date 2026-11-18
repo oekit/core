@@ -28,7 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
+
+	"github.com/oekit/pkg/container"
 )
 
 // ErrInvalidConfig 是治理模板校验失败的 sentinel(用 errors.Is 判定)。
@@ -139,32 +140,38 @@ func (c *Config) Validate() error {
 // Store 是原子替换的配置持有者:消费方 Load 拿到的是不可变快照,
 // 发布方 Update 整体替换 — 读侧无锁、无部分更新可见。
 //
-// 值与版本绑在**同一个原子单元**里发布(单 atomic.Pointer[cell]):
-// 拆成两个原子变量的实现,读者会在跨字段的交错窗口拿到「新值配旧代次」
-// 的自相矛盾对(core#79 实测 20 万次 Update 观察到 345 次)——按
-// Version()==last 判断变化的消费方会漏判,派生状态停留在旧配置。
-// 同构范式见 config.Snapshot(单单元发布 + CAS 推进代次)。
+// 值与版本绑在**同一个原子单元**里发布:拆成两个原子变量的实现,读者会在
+// 跨字段的交错窗口拿到「新值配旧代次」的自相矛盾对(core#79 实测 20 万次
+// Update 观察到 345 次)——按 Version()==last 判断变化的消费方会漏判,
+// 派生状态停留在旧配置。
+//
+// 机制单源(#535):单元发布/CAS 推进代次/一致读下沉为
+// pkg/container.VersionedCell(值内嵌——零值 cell 的 Load 返回零值对、首次
+// Publish 从 gen 0 推进到 1,零值 Store 可用与并发 Update 的并发安全都由
+// cell 的零值语义原生兜住,core#193);本类型只保留领域皮——「nil→空配置」
+// 「Update 入库前深拷贝」「NewStore 初始版本为 0」的口径在包装层实现。
+// 同构范式 config.Snapshot 亦已改薄同一机制单元的包装。
 type Store struct {
-	cell atomic.Pointer[storeCell]
-}
+	// cell 是发布值的机制单元(pkg/container.VersionedCell,#535):值与版本
+	// 同生同灭,读侧一次 Load 拿到一致的一对,不存在「配置换过但版本没动」
+	// 的窗口。gen==0 当且仅当从未 Update——NewStore 的 gen 0 基线由 initial
+	// 承载,cell 在首次 Update 前保持零值。
+	cell container.VersionedCell[*Config]
 
-// storeCell 是发布值的单真相单元:值与版本同生同灭,读侧一次 Load
-// 拿到的一致的一对,不存在「配置换过但版本没动」的窗口。
-type storeCell struct {
-	val *Config
-	gen int64
+	// initial 是 NewStore 注入的 gen 0 基线快照(构造期深拷贝)。VersionedCell
+	// 只在 Publish 时推进代次(首次 Publish 即 gen 1),而 NewStore 契约要求
+	// 「初始版本为 0」——基线不入 cell,读侧在 gen==0(尚无 Update)时返回它。
+	// 构造后只读,并发读安全;零值 Store 为 nil → 空配置(core#193)。
+	initial *Config
 }
 
 // NewStore 用初始配置建 Store(nil 合法,视为空配置)。初始版本为 0,
 // 此后每次 Update +1。入参在入库前深拷贝——发布方之后对 cfg 的任何
 // 改写都不会波及已发布快照(见 Update)。
 func NewStore(cfg *Config) *Store {
-	s := &Store{}
-	if cfg == nil {
-		cfg = &Config{}
-	}
-	s.cell.Store(&storeCell{val: deepCopyConfig(cfg), gen: 0})
-	return s
+	// 基线不入 cell:NewStore 契约是「初始版本为 0」,而 VersionedCell 的
+	// 发布一律推进代次——gen 0 基线由 initial 字段承载(见 Store.initial)。
+	return &Store{initial: deepCopyConfig(cfg)}
 }
 
 // Load 返回当前配置快照(不可变;消费方不得修改,发布方也改不到——
@@ -174,22 +181,24 @@ func NewStore(cfg *Config) *Store {
 // `type S struct{ gov Store }`)不再在首个请求上 nil 解引用;与
 // NewStore(nil) 的「nil 合法,视为空配置」语义一致。
 func (s *Store) Load() *Config {
-	if c := s.cell.Load(); c != nil {
-		return c.val
+	if v, gen := s.cell.Load(); gen > 0 {
+		return v
+	}
+	// gen 0 = 尚无 Update:返回 NewStore 的初始基线;零值 Store 的基线为
+	// nil → 空配置(零值可用,core#193)。
+	if s.initial != nil {
+		return s.initial
 	}
 	return &Config{}
 }
 
 // Version 返回配置版本号(每次 Update +1),消费方可据此判断是否变化。
-// 版本是发布单元的投影(与值同一次原子替换),因此「看到新值」必然
+// 版本是发布单元的投影(与值同一次原子替换,#535),因此「看到新值」必然
 // 「看到新版本」;Load() 与 Version() 两次调用之间若插进一次 Update,
 // 版本只会**偏新**不会偏旧——最多多重建一次派生状态,不会漏判
 // (core#79)。要一次拿到一致的一对请用 LoadVersion。
 func (s *Store) Version() int64 {
-	if c := s.cell.Load(); c != nil {
-		return c.gen
-	}
-	return 0
+	return int64(s.cell.Version())
 }
 
 // LoadVersion 一次返回一致的一对:当前配置与它的版本号。需要「拿到值的
@@ -197,8 +206,11 @@ func (s *Store) Version() int64 {
 // Load() + Version() 两次调用——两次调用之间可能插进一次 Update,拿到的
 // 值与版本来自不同代。
 func (s *Store) LoadVersion() (*Config, int64) {
-	if c := s.cell.Load(); c != nil {
-		return c.val, c.gen
+	if v, gen := s.cell.Load(); gen > 0 {
+		return v, int64(gen)
+	}
+	if s.initial != nil {
+		return s.initial, 0
 	}
 	return &Config{}, 0
 }
@@ -211,25 +223,18 @@ func (s *Store) LoadVersion() (*Config, int64) {
 // 发布方写 map 与消费方读 map 构成数据竞争。深拷贝后发布方怎么改入参
 // 都不影响快照,「不可变快照」承诺对发布方与消费方同时成立。
 //
-// 并发安全:多个发布者同时调用,每次成功发布恰好推进一版(CAS 循环),
-// 版本不会重复、不会回退。
+// 并发安全:多个发布者同时调用,每次成功发布恰好推进一版(CAS 循环,
+// 机制单源 VersionedCell,#535),版本不会重复、不会回退。
 func (s *Store) Update(cfg *Config) {
 	if cfg == nil {
+		// nil 合法 → 空配置(领域皮):VersionedCell 对指针 nil 是「原样发布
+		// 并推进代次」(#535,机制层不解读),nil 拦截必须在 Publish 之前。
 		cfg = &Config{}
 	}
-	next := &storeCell{val: deepCopyConfig(cfg)}
-	for {
-		cur := s.cell.Load()
-		if cur == nil {
-			// 零值 Store 首次 Update(core#193):nil 单元视作 gen 0
-			next.gen = 1
-		} else {
-			next.gen = cur.gen + 1
-		}
-		if s.cell.CompareAndSwap(cur, next) {
-			return
-		}
-	}
+	// 零值 Store 首次 Update(core#193):零值 cell 视作 gen 0,发布推进到
+	// gen 1(VersionedCell 零值发布语义,并发 Update 由 cell 内 CAS 兜住,
+	// 不重不漏)。
+	s.cell.Publish(deepCopyConfig(cfg))
 }
 
 // deepCopyConfig 深拷贝治理模板的四个 map(值类型元素,一层条目拷贝即完整)。
