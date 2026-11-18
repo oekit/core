@@ -7,6 +7,11 @@
 //
 // bootstrap.App 隐式满足本接口，调用方无需任何适配代码。
 // 本包为框架无关的底层契约包，不得引入任何 transport 或注册中心依赖。
+//
+// 本包另含 ReadyProbe 就绪探活机制（自 hertz/kitex bootstrap 的 RunServer
+// 探活骨架下沉，oekit/core#208）：RunServer「探活与 server 启动并发 + 探活
+// 失败触发优雅关机 + 正常关停打断探活」的单源机制件，hertz/kitex 侧消费方
+// 联动 PR 跟进迁移。
 package lifecycle
 
 import "context"
