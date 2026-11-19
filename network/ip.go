@@ -161,7 +161,9 @@ var errNoLocalIP = errors.New("network: no suitable local IP found")
 // GetLocalIP 返回本机首选非回环 IPv4 地址。
 // 优先读取 POD_IP 环境变量（K8s 注入），其次遍历网卡获取第一个非回环 IPv4。
 // 未找到时返回错误。这是 ekit 中获取本机 IP 的唯一实现，
-// uidgen、nacos、registry 等包应委托至此，避免逻辑重复。
+// 注册面消费方（registry/netutil、nns/client/register，经 GetPodIP）
+// 应委托至此，避免逻辑重复——名单曾写 uidgen、nacos，是 ekit 单体时代
+// 残留，两处全目录零引用（core#223）。
 //
 // POD_IP 经 net.ParseIP 校验，必须是 IPv4 且**非回环、非未指定**（本函数契约是
 // 「非回环 IPv4」，core#87 只挡了「形状非法」，core#120 补上「语义非法」）：
@@ -201,7 +203,9 @@ func GetLocalIP() (string, error) {
 // registry.ParseAddr）已按 fail-closed 拒绝回环地址，这里的 ERROR 是
 // 「注册为什么被拒」的第一现场（IPv6-only 环境、POD_IP 未注入、多网卡
 // 取不到 IPv4 都会走到这里）。
-// 这是 GetLocalIP 的便捷封装，uidgen、nacos、registry 应委托至此。
+// 这是 GetLocalIP 的便捷封装。注册面消费方：registry/netutil、
+// nns/client/register（core#223——此前名单 uidgen、nacos 是 ekit 单体
+// 时代残留，kitx/uidgen 与 registry/nacos 全目录零引用）。
 func GetPodIP() string {
 	ip, err := GetLocalIP()
 	if err != nil {
