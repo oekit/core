@@ -1,5 +1,10 @@
 
 
+## [v0.17.2] — 2026-11-20
+
+- docs(network): GetPodIP/GetLocalIP 消费方名单对齐实况——旧名单（uidgen/nacos/registry）是 ekit 单体时代残留且零引用，真消费方 registry/netutil 与 nns/client/register 补录（#223）
+docs(chain): Timeout godoc 补警示——硬掐断形态进 hertz/chainmw.Wrap 链会双写同一响应缓冲，hertz 链超时治理走 hertz/governance（#224）
+
 ## [v0.17.1] — 2026-11-19
 
 - - refactor: lifecycle 三处手写 nil-ctx 兜底（ReadyProbe.Run/Shutdown/Drain）接 contextx.OrBackground 单源——core#159 全仓口径的收割漏网，纯机械替换无行为变化（#218）
