@@ -158,6 +158,17 @@ func (m *Manager) AddCloser(name string, closer interface{ Close() error }, time
 	m.Add(name, func(_ context.Context) error { return closer.Close() }, timeout)
 }
 
+// AddResourceTimeout 实现 [ResourceAdderWithTimeout]：注册一个带独立关停
+// 预算的资源（core#227）。参数顺序与 bootstrap.App.AddResourceTimeout
+// 逐字一致（name, timeout, closer），两个实现可直接互换。
+//
+// timeout 语义同 Add：>0 为该资源的独立预算；0 使用 Manager 的默认超时；
+// 默认超时也为 0 或 timeout 为负时不设超时。Manager 的 per-job 预算从
+// Background 派生、彼此隔离——单个资源超时不会挤占后续资源的预算。
+func (m *Manager) AddResourceTimeout(name string, timeout time.Duration, closer func(ctx context.Context) error) {
+	m.Add(name, closer, timeout)
+}
+
 // AddTeardown 注册一个无参数的清理函数（不接受 context，不返回 error）。
 // 关停期间注册的口径与 Add 相同（core#116）：teardown 执行期间经
 // AddTeardown 登记的函数会被本次关停补齐执行，不静默漏调。
