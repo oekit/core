@@ -1,5 +1,16 @@
 
 
+## [v0.18.0] — 2026-11-21
+
+- 第三轮设计/缺陷审计（2026-11-21）core 修复：
+
+- feat: lifecycle 新增可选能力接口 ResourceAdderWithTimeout + AddResourceWithTimeout 统一注册面（能力实现走预算路径、否则回退 AddResource）——per-resource 关停预算进入接口层，消费方不必各写适配层（#227）
+- fix: lifecycle Listen 无参默认补 SIGTERM（{os.Interrupt, syscall.SIGTERM}）——此前仅捕 SIGINT，K8s 停机 SIGTERM 不触发优雅关停（#231）
+- fix: config merge 指针字段 src nil 时 overwrite 与 zeroable 同权 SetZero——远端删除配置块热更不再静默失效（#231）
+- fix: config loader YAML 标量拦截清单补前导 &/*——env 值以 & 开头不再被解析成锚点/null 静默改义（#231）
+
+关联问题单：core#227、core#231。
+
 ## [v0.17.2] — 2026-11-20
 
 - docs(network): GetPodIP/GetLocalIP 消费方名单对齐实况——旧名单（uidgen/nacos/registry）是 ekit 单体时代残留且零引用，真消费方 registry/netutil 与 nns/client/register 补录（#223）
