@@ -176,15 +176,20 @@ func overlayFields(dst, src reflect.Value, path string, explicit FieldSet, envOv
 				overlayFields(dstField, srcField, fpath, explicit, envOverlay)
 			}
 		case reflect.Pointer:
-			// zeroable 的 nil 同样是有效值：远程配置缺块 = 显式清空
-			// （dst 保持旧值会让"删除配置块"的热更语义失效）
+			// nil 的 src 指针同样是有效值：远程配置删除该配置块 = 显式清空
+			// （dst 保持旧值会让"删除配置块"的热更语义失效）。
+			//
+			// overwrite 与 zeroable 同权（core#231）：overwrite 的
+			// 「整体替换（包括零值）」承诺必须覆盖 nil——此前只清 zeroable，
+			// overwrite 指针在远端删除配置块时静默保留旧值，与 struct/map
+			// 分支的 overwrite 置零语义不对称，热更静默失效。
 			if srcField.IsNil() {
 				if envOverlay {
-					// env 变体（core#101）：nil（含 zeroable 的 nil）= env
-					// 未命中该字段，不写零值、不清 dst。
+					// env 变体（core#101）：nil（含 zeroable/overwrite 的
+					// nil）= env 未命中该字段，不写零值、不清 dst。
 					continue
 				}
-				if tag == "zeroable" {
+				if isZeroable(tag) {
 					dstField.SetZero()
 				}
 				continue
