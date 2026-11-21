@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/oekit/core/internal/logkey"
@@ -180,6 +181,12 @@ func (m *Manager) AddTeardown(fn func()) {
 //
 // 排空时长由 SetDrainTimeout 控制（默认 30s）。
 //
+// **未显式传 signals 时的默认信号集合是 {os.Interrupt, syscall.SIGTERM}**
+// （core#231）：SIGINT 覆盖本地 Ctrl-C，SIGTERM 覆盖 K8s / 容器编排器的
+// 标准终止信号。此前默认只捕 os.Interrupt，K8s 下 SIGTERM 不触发优雅关停
+// （进程直接退出，drain / 资源反注册 / DB flush 全部不执行）。
+// 显式传入 signals 时按传入集合监听（不叠加默认值）。
+//
 // **第二枪语义覆盖两个阶段（core#142）**：① 排空期间再收到一个信号
 // （编排器连发两次 SIGTERM、运维连按两次 Ctrl-C）立即放弃等待并进入资源
 // 关闭——第二枪的语义就是「别等了，现在就关」；② **资源关闭执行期**再收到
@@ -191,7 +198,7 @@ func (m *Manager) AddTeardown(fn func()) {
 // 任务」，彻底卡死的 closer 仍需编排器 SIGKILL 兜底。
 func (m *Manager) Listen(signals ...os.Signal) {
 	if len(signals) == 0 {
-		signals = []os.Signal{os.Interrupt}
+		signals = defaultListenSignals()
 	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, signals...)
@@ -201,6 +208,13 @@ func (m *Manager) Listen(signals ...os.Signal) {
 	// SIGKILL 才能收尸。
 	defer signal.Stop(ch)
 	m.listenLoop(ch)
+}
+
+// defaultListenSignals 返回 Listen 未显式指定信号时的默认集合
+// （core#231）：Ctrl-C 的 SIGINT + 容器编排器（K8s 等）的 SIGTERM。
+// 每次调用返回新切片，调用方改写不会污染后续调用。
+func defaultListenSignals() []os.Signal {
+	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }
 
 // listenLoop 是 Listen 的心跳：等第一个信号 → 停收新请求 → 排空 → 关闭资源。

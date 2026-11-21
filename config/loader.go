@@ -25,8 +25,9 @@ var envPattern = regexp.MustCompile(`\$\{([^}:]+)(?::([^}]*))?\}`)
 // 替换发生在 YAML 解码**之前**，无法感知占位符所在的标量上下文，因此对会让
 // 值**静默损坏**的替换值 fail-closed 报错（不回显值本身——这类值多半是密钥）：
 // 换行/回车（双引号标量折叠为空格）、前导 `#`（整个值变注释）、` #`
-// （后半截被当注释截断）与反斜杠（core#83：双引号标量里 `\n`/`\t`/`\\` 被
-// 重新解释，值被静默改写）。含 `"` 的值在双引号标量里会破坏配对导致解析
+// （后半截被当注释截断）、前导 `&`/`*`（core#231：被解析成 YAML 锚点 /
+// 别名的标记，值被丢弃或改写）与反斜杠（core#83：双引号标量里
+// `\n`/`\t`/`\\` 被重新解释，值被静默改写）。含 `"` 的值在双引号标量里会破坏配对导致解析
 // 失败，本就 fail-closed——且该解析错误现经 wrapEnvParseError 点名 env 变量
 // （core#83 第二点）。多行证书/含注释符的 token 这类值请经 ApplyEnvOverlay
 // （结构体级注入，无文本上下文问题）传入（core#59）。
@@ -66,6 +67,17 @@ func yamlCorruptingSequence(val string) (snippet, reason string) {
 	}
 	if strings.HasPrefix(val, "#") {
 		return "a leading '#'", "YAML parses the entire value as a comment leaving the field empty"
+	}
+	if strings.HasPrefix(val, "&") {
+		// core#231：`token: ${TOKEN}` + TOKEN="&foo" → `token: &foo` 被解析成
+		// 锚点（值为 null）；"&foo secret" 被截成 secret——解析成功但值已被
+		// 重释，属于静默损坏面。
+		return "a leading '&'", "YAML parses it as an anchor name: the intended literal value is dropped or rewritten (e.g. \"&foo secret\" becomes \"secret\")"
+	}
+	if strings.HasPrefix(val, "*") {
+		// core#231：`token: ${TOKEN}` + TOKEN="*foo" → YAML 别名引用，解析
+		// 成功时取值来自锚点节点而非字面量——与锚点同族的静默重释。
+		return "a leading '*'", "YAML parses it as an alias to another node, silently replacing the literal value"
 	}
 	if strings.Contains(val, " #") {
 		return "' #'", "YAML treats everything after ' #' as a comment and truncates the value"
