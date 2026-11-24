@@ -2,7 +2,8 @@ package config
 
 import (
 	"fmt"
-	"sync/atomic"
+
+	"github.com/oekit/pkg/container"
 )
 
 // Snapshot 是一个**已解析配置值**的原子发布/无判空读取单元。
@@ -81,18 +82,16 @@ import (
 //
 // Snapshot 的**零值不可用**：内部单元未初始化，`Get`/`Load`/`Version` 会在空指针上
 // panic（不是返 nil——nil 会让判空样板重新扩散回来）。一律用 NewSnapshot 构造。
-type Snapshot[T any] struct {
-	cell atomic.Pointer[snapshotCell[T]]
-}
-
-// snapshotCell 是发布值的**单真相**单元。
 //
-// 值与代次必须同生同灭：拆成两个原子变量时，读侧的一次 Load 会在跨字段的交错
-// 窗口里读到「新值 + 旧代次」或「旧值 + 新代次」，而 Snapshot 存在的理由之一就是
-// 让「换过没有」有唯一答案。
-type snapshotCell[T any] struct {
-	val *T
-	gen uint64
+// 机制单源（#535）：值与代次的成对发布、CAS 推进代次、一致读下沉为
+// pkg/container.VersionedCell，本类型只保留领域皮——「Get 永不返 nil」的
+// 契约与「Publish(nil) 被忽略」的口径在包装层实现。
+type Snapshot[T any] struct {
+	// cell 是发布值的机制单元（pkg/container.VersionedCell，#535）：值与代次
+	// 同生同灭，读侧一次 Load 拿到一致的一对，不存在「值换过但代次没动」的
+	// 窗口。指针持有：零值 Snapshot（未经 NewSnapshot）cell 为 nil，读路径在
+	// 空指针上立刻 panic——「零值不可用」契约见上。
+	cell *container.VersionedCell[*T]
 }
 
 // NewSnapshot 用一份默认配置构造 Snapshot。
@@ -108,9 +107,9 @@ func NewSnapshot[T any](defaults *T) *Snapshot[T] {
 		panic("config: NewSnapshot 的 defaults 不能为 nil（Get 永不返 nil 是本类型的契约；" +
 			"想表达「还没有配置」请用 Version() > 0 判断）")
 	}
-	s := &Snapshot[T]{}
-	s.cell.Store(&snapshotCell[T]{val: defaults, gen: 0})
-	return s
+	// 构造期注入默认值 ⇒ cell 发布代次 0、Get 永不返 nil（领域皮）；
+	// 值与代次同单元的原子机制归 VersionedCell（#535）。
+	return &Snapshot[T]{cell: container.NewVersionedCell[*T](defaults)}
 }
 
 // Get 返回当前发布的配置，**永不返 nil**（未发布过时返构造期的默认值）。
@@ -118,7 +117,10 @@ func NewSnapshot[T any](defaults *T) *Snapshot[T] {
 // 返回的是发布者交进来的那个指针（零拷贝）——读取方**不得修改**它，发布者也
 // 不得在 Publish 之后再改它。要按配置派生一份可变副本，自行浅拷贝。
 func (s *Snapshot[T]) Get() *T {
-	return s.cell.Load().val
+	// 契约由构造期注入的默认值兑现（cell 发布代次 0 持有 defaults），发布侧
+	// 的 nil 又被 Publish 拦下 ⇒ Load 出的指针永不 nil，读取方零判空。
+	v, _ := s.cell.Load()
+	return v
 }
 
 // Load 返回**一致的一对**：当前配置与它的代次。
@@ -127,8 +129,8 @@ func (s *Snapshot[T]) Get() *T {
 // 用它而不是 `Get()` + `Version()` 两次调用——两次调用之间可能插进一次发布，
 // 于是拿到的值与代次来自不同代（仓内同类教训：快照 gen 与全局 gen 自相矛盾的一对）。
 func (s *Snapshot[T]) Load() (*T, uint64) {
-	c := s.cell.Load()
-	return c.val, c.gen
+	// VersionedCell.Load 即「一致的一对」原语（值与代次同单元发布，#535）。
+	return s.cell.Load()
 }
 
 // Version 返回当前配置的代次：默认值 0，此后每次**成功**发布 +1。
@@ -137,7 +139,7 @@ func (s *Snapshot[T]) Load() (*T, uint64) {
 // 用来回答「换过没有」而不是「值是不是同一个」（指针比对会被 ABA 与「相同内容
 // 重新发布」骗过）。
 func (s *Snapshot[T]) Version() uint64 {
-	return s.cell.Load().gen
+	return s.cell.Version()
 }
 
 // Publish 原子发布一份新配置。签名是 `func(*T)`，可直接作为变更回调传入
@@ -160,15 +162,12 @@ func (s *Snapshot[T]) Version() uint64 {
 // 解码结果（那才是知识所在的位置），不要指望这里报告。
 func (s *Snapshot[T]) Publish(v *T) {
 	if v == nil {
+		// nil 被忽略（领域皮）：VersionedCell 对指针 nil 是「原样发布并推进
+		// 代次」（#535，机制层不解读），「永不返 nil」契约要求包装层拦在
+		// Publish 之前——保持上一份好值、代次不前进。
 		return
 	}
-	for {
-		cur := s.cell.Load()
-		next := &snapshotCell[T]{val: v, gen: cur.gen + 1}
-		if s.cell.CompareAndSwap(cur, next) {
-			return
-		}
-	}
+	s.cell.Publish(v)
 }
 
 // String 便于在日志里打印当前代次（不含配置内容——配置里常有密钥，而

@@ -186,3 +186,43 @@ func TestApplyEnvOverlaySliceElementEnv(t *testing.T) {
 		t.Errorf("override element merge wiped non-env field: Name=%q", ocfg.Items[0].Name)
 	}
 }
+
+// TestApplyEnvOverlayNestedSliceGrowth 回归 core#187：growOverlaySlices 此前
+// 铺一层就停（切片元素内部的切片不铺），且指针分支「!of.IsNil()」在零值
+// overlay 上不可达（*struct 字段恒 nil，nil 按需分配的口径没落地）。
+func TestApplyEnvOverlayNestedSliceGrowth(t *testing.T) {
+	type leaf struct {
+		Rate int `yaml:"rate" env:"LEAF_RATE"`
+	}
+
+	// 场景一：[]struct 元素内部还有切片（缺口一）
+	type mid struct {
+		Leaves []leaf `yaml:"leaves"`
+	}
+	type cfgA struct {
+		Mids []mid `yaml:"mids"`
+	}
+	t.Setenv("LEAF_RATE", "7")
+	dstA := &cfgA{Mids: []mid{{Leaves: []leaf{{Rate: 1}}}}}
+	if err := ApplyEnvOverlay(dstA); err != nil {
+		t.Fatalf("ApplyEnvOverlay: %v", err)
+	}
+	if dstA.Mids[0].Leaves[0].Rate != 7 {
+		t.Errorf("切片元素内部的切片未铺开: Rate=%d, want 7 (#187 缺口一)", dstA.Mids[0].Leaves[0].Rate)
+	}
+
+	// 场景二：*struct 字段（缺口二：nil 按需分配后下探）
+	type group struct {
+		Leaves []leaf `yaml:"leaves"`
+	}
+	type cfgB struct {
+		Group *group `yaml:"group"`
+	}
+	dstB := &cfgB{Group: &group{Leaves: []leaf{{Rate: 5}}}}
+	if err := ApplyEnvOverlay(dstB); err != nil {
+		t.Fatalf("ApplyEnvOverlay: %v", err)
+	}
+	if dstB.Group.Leaves[0].Rate != 7 {
+		t.Errorf("*struct 下探未生效: Rate=%d, want 7 (#187 缺口二)", dstB.Group.Leaves[0].Rate)
+	}
+}

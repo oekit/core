@@ -50,3 +50,21 @@ func TestNoopHeader(t *testing.T) {
 		t.Fatal("NoopHeader must be a zero-value sink")
 	}
 }
+
+func TestMapHeaderCanonicalKeys(t *testing.T) {
+	// core#192：键按 MIME 规范形式归一——与 http.Header 同语义。
+	h := transport.MapHeader{}
+	h.Set("content-type", "application/json")
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Get(Content-Type) = %q, want application/json(大小写归一)", got)
+	}
+	h.Add("X-Custom-Key", "a")
+	h.Add("x-custom-key", "b")
+	if got := h.Values("X-CUSTOM-KEY"); len(got) != 2 {
+		t.Fatalf("Values 跨大小写应命中同一槽位: %v", got)
+	}
+	h.Del("CONTENT-type")
+	if h.Get("content-type") != "" {
+		t.Fatal("Del 应按归一键删除")
+	}
+}

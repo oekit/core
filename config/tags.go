@@ -12,6 +12,7 @@ import (
 
 	"github.com/oekit/core/internal/logkey"
 	pkgconfig "github.com/oekit/pkg/config"
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // targetTagNames 是本包支持的独立结构体 tag 集合（与 yaml/merge tag 互不冲突），
@@ -57,7 +58,7 @@ func FillDefaults(v any, opts ...PassOption) error {
 		return fillDefaultField(sf, fv, path, cfg.set)
 	}
 	if err := walkTaggedStruct(rv, "", "", true, true, fill); err != nil {
-		return fmt.Errorf("config: FillDefaults: %w", err)
+		return pkgerrors.Wrapf(err, "config: FillDefaults")
 	}
 	return nil
 }
@@ -90,7 +91,7 @@ func ApplyEnv(v any, opts ...PassOption) error {
 		return applyEnvField(sf, fv, path, yamlPath, addr, cfg.set, cfg.envNaming, cfg.lenientEnv, cfg.trimEnvStrings)
 	}
 	if err := walkTaggedStruct(rv, "", "", true, true, apply); err != nil {
-		return fmt.Errorf("config: ApplyEnv: %w", err)
+		return pkgerrors.Wrapf(err, "config: ApplyEnv")
 	}
 	return nil
 }
@@ -122,7 +123,7 @@ func ValidateTags(v any, opts ...PassOption) error {
 	}
 	cfg := buildPassConfig(opts)
 	if err := checkEnvNaming(cfg.envNaming); err != nil {
-		return fmt.Errorf("config: ValidateTags: %w", err)
+		return pkgerrors.Wrapf(err, "config: ValidateTags")
 	}
 	envSeen := map[string]envSeenEntry{} // env name -> first field
 	validate := func(sf reflect.StructField, fv reflect.Value, path, yamlPath string, addr bool) error {
@@ -130,7 +131,7 @@ func ValidateTags(v any, opts ...PassOption) error {
 	}
 	// 只读校验，不分配：nil 的 *struct 里没有可校验的值。
 	if err := walkTaggedStruct(rv, "", "", true, false, validate); err != nil {
-		return fmt.Errorf("config: ValidateTags: %w", err)
+		return pkgerrors.Wrapf(err, "config: ValidateTags")
 	}
 	return nil
 }
@@ -180,11 +181,11 @@ func ApplyTagPasses(cfg any, yamlData []byte, opts ...PassOption) error {
 // fn 用于错误信息里标明调用方（FillDefaults/ApplyEnv/ValidateTags）。
 func targetStructValue(v any, fn string) (reflect.Value, error) {
 	if v == nil {
-		return reflect.Value{}, fmt.Errorf("config: %s: target must be a non-nil pointer to struct, got nil", fn)
+		return reflect.Value{}, pkgerrors.Newf("config: %s: target must be a non-nil pointer to struct, got nil", fn)
 	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
-		return reflect.Value{}, fmt.Errorf("config: %s: target must be a non-nil pointer to struct, got %T", fn, v)
+		return reflect.Value{}, pkgerrors.Newf("config: %s: target must be a non-nil pointer to struct, got %T", fn, v)
 	}
 	return rv.Elem(), nil
 }
@@ -492,7 +493,7 @@ func validateEnvNaming(sf reflect.StructField, path, yamlPath string, addr bool,
 	if !mismatched {
 		return nil
 	}
-	return fmt.Errorf("field %q: env tag %q differs from derived name %q (intentional? add ignorederived:\"true\")", path, name, der)
+	return pkgerrors.Newf("field %q: env tag %q differs from derived name %q (intentional? add ignorederived:\"true\")", path, name, der)
 }
 
 // LintEnvNaming 静态扫描 env tag 与推导约定名不一致的字段，返回诊断行
@@ -517,7 +518,7 @@ func LintEnvNaming(v any, opts ...PassOption) ([]string, error) {
 		return nil
 	}
 	if err := walkTaggedStruct(rv, "", "", true, false, walk); err != nil {
-		return nil, fmt.Errorf("config: LintEnvNaming: %w", err)
+		return nil, pkgerrors.Wrapf(err, "config: LintEnvNaming")
 	}
 	return out, nil
 }
@@ -539,10 +540,10 @@ func validateRequireField(sf reflect.StructField, fv reflect.Value, path string,
 		if binding := resolveEnvName(sf, yamlPath, addr, n); binding.name != "" {
 			source = fmt.Sprintf("yaml or env %s", binding.name)
 		}
-		return fmt.Errorf("field %q: required but not provided (set %s)", path, source)
+		return pkgerrors.Newf("field %q: required but not provided (set %s)", path, source)
 	}
 	if fv.IsZero() {
-		return fmt.Errorf("field %q: required but value is zero (provide via yaml or env before ValidateTags)", path)
+		return pkgerrors.Newf("field %q: required but value is zero (provide via yaml or env before ValidateTags)", path)
 	}
 	return nil
 }
@@ -564,13 +565,13 @@ func validateEnvField(sf reflect.StructField, path, yamlPath string, addr bool, 
 		return nil
 	}
 	if !envNamePattern.MatchString(binding.name) {
-		return fmt.Errorf("field %q: env name %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, binding.name)
+		return pkgerrors.Newf("field %q: env name %q is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)", path, binding.name)
 	}
 	if prev, dup := envSeen[binding.name]; dup {
 		if prev.yamlPath == yamlPath {
 			return nil // 同一逻辑字段的多个实例（切片元素）
 		}
-		return fmt.Errorf("field %q: env name %q already used by field %q", path, binding.name, prev.path)
+		return pkgerrors.Newf("field %q: env name %q already used by field %q", path, binding.name, prev.path)
 	}
 	envSeen[binding.name] = envSeenEntry{path: path, yamlPath: yamlPath}
 	return nil
@@ -600,7 +601,7 @@ func setScalarFromString(fv reflect.Value, s, source, path string) error {
 	s = strings.TrimSpace(s)
 	if fv.Kind() == reflect.Slice {
 		if fv.Type().Elem().Kind() != reflect.String {
-			return fmt.Errorf("field %q: %s cannot be applied to type %s", path, source, fv.Type())
+			return pkgerrors.Newf("field %q: %s cannot be applied to type %s", path, source, fv.Type())
 		}
 		parts := splitCommaList(s)
 		out := reflect.MakeSlice(fv.Type(), len(parts), len(parts))
@@ -611,7 +612,7 @@ func setScalarFromString(fv reflect.Value, s, source, path string) error {
 		return nil
 	}
 	if err := pkgconfig.SetFromString(s, fv); err != nil {
-		return fmt.Errorf("field %q: %s: %w", path, source, err)
+		return pkgerrors.Wrapf(err, "field %q: %s", path, source)
 	}
 	return nil
 }
@@ -634,7 +635,7 @@ func splitCommaList(s string) []string {
 func validateRangeField(fv reflect.Value, rng, path string) error {
 	isDur := fv.Type() == pkgconfig.DurationType
 	if !isDur && !isNumericKind(fv.Kind()) {
-		return fmt.Errorf("field %q: range tag only applies to numeric fields, got %s", path, fv.Type())
+		return pkgerrors.Newf("field %q: range tag only applies to numeric fields, got %s", path, fv.Type())
 	}
 
 	// Duration 字段边界用 duration 文法；普通数值字段边界用十进制数（支持小数）。
@@ -642,20 +643,20 @@ func validateRangeField(fv reflect.Value, rng, path string) error {
 		if isDur {
 			d, err := time.ParseDuration(s)
 			if err != nil {
-				return 0, fmt.Errorf("invalid duration bound %q (duration fields need time.ParseDuration syntax like 30s)", s)
+				return 0, pkgerrors.Newf("invalid duration bound %q (duration fields need time.ParseDuration syntax like 30s)", s)
 			}
 			return float64(d), nil
 		}
 		f, err := strconv.ParseFloat(s, 64)
 		if err != nil {
-			return 0, fmt.Errorf("invalid numeric bound %q", s)
+			return 0, pkgerrors.Newf("invalid numeric bound %q", s)
 		}
 		return f, nil
 	}
 
 	low, high, lowInc, highInc, err := parseInterval(rng, parseBound)
 	if err != nil {
-		return fmt.Errorf("field %q: invalid range tag %q: %w", path, rng, err)
+		return pkgerrors.Wrapf(err, "field %q: invalid range tag %q", path, rng)
 	}
 
 	var val float64
@@ -677,7 +678,7 @@ func validateRangeField(fv reflect.Value, rng, path string) error {
 	if isDur {
 		valStr = time.Duration(int64(val)).String()
 	}
-	return fmt.Errorf("field %q: value %s out of range %s", path, valStr, strings.TrimSpace(rng))
+	return pkgerrors.Newf("field %q: value %s out of range %s", path, valStr, strings.TrimSpace(rng))
 }
 
 // parseInterval 解析 range 文法 `[a,b]`/`(a,b)`/`[a,b)`/`(a,b]`/`[a,)`/`(,b]`，
@@ -687,48 +688,48 @@ func validateRangeField(fv reflect.Value, rng, path string) error {
 func parseInterval(rng string, parseBound func(string) (float64, error)) (low, high *float64, lowInc, highInc bool, err error) {
 	s := strings.TrimSpace(rng)
 	if len(s) < 2 {
-		return nil, nil, false, false, fmt.Errorf("too short")
+		return nil, nil, false, false, pkgerrors.New("too short")
 	}
 	switch s[0] {
 	case '[':
 		lowInc = true
 	case '(':
 	default:
-		return nil, nil, false, false, fmt.Errorf("must start with '[' or '('")
+		return nil, nil, false, false, pkgerrors.New("must start with '[' or '('")
 	}
 	switch s[len(s)-1] {
 	case ']':
 		highInc = true
 	case ')':
 	default:
-		return nil, nil, false, false, fmt.Errorf("must end with ']' or ')'")
+		return nil, nil, false, false, pkgerrors.New("must end with ']' or ')'")
 	}
 
 	parts := strings.Split(s[1:len(s)-1], ",")
 	if len(parts) != 2 {
-		return nil, nil, false, false, fmt.Errorf(`expected form "[a,b]", got %q`, s)
+		return nil, nil, false, false, pkgerrors.Newf(`expected form "[a,b]", got %q`, s)
 	}
 	left := strings.TrimSpace(parts[0])
 	right := strings.TrimSpace(parts[1])
 	if left == "" && right == "" {
-		return nil, nil, false, false, fmt.Errorf("both bounds are empty")
+		return nil, nil, false, false, pkgerrors.New("both bounds are empty")
 	}
 	if left != "" {
 		v, perr := parseBound(left)
 		if perr != nil {
-			return nil, nil, false, false, fmt.Errorf("lower bound: %w", perr)
+			return nil, nil, false, false, pkgerrors.Wrapf(perr, "lower bound")
 		}
 		low = &v
 	}
 	if right != "" {
 		v, perr := parseBound(right)
 		if perr != nil {
-			return nil, nil, false, false, fmt.Errorf("upper bound: %w", perr)
+			return nil, nil, false, false, pkgerrors.Wrapf(perr, "upper bound")
 		}
 		high = &v
 	}
 	if low != nil && high != nil && *low > *high {
-		return nil, nil, false, false, fmt.Errorf("lower bound %g greater than upper bound %g", *low, *high)
+		return nil, nil, false, false, pkgerrors.Newf("lower bound %g greater than upper bound %g", *low, *high)
 	}
 	return low, high, lowInc, highInc, nil
 }
@@ -754,11 +755,11 @@ func isNumericKind(k reflect.Kind) bool {
 // （空串同样必须命中；可选枚举字段请配合 default tag）。
 func validateOptionsField(fv reflect.Value, opts, path string) error {
 	if fv.Kind() != reflect.String {
-		return fmt.Errorf("field %q: options tag only applies to string fields, got %s", path, fv.Type())
+		return pkgerrors.Newf("field %q: options tag only applies to string fields, got %s", path, fv.Type())
 	}
 	allowed := splitCommaList(opts)
 	if len(allowed) == 0 {
-		return fmt.Errorf("field %q: options tag has no values", path)
+		return pkgerrors.Newf("field %q: options tag has no values", path)
 	}
 	val := fv.String()
 	for _, a := range allowed {
@@ -766,5 +767,5 @@ func validateOptionsField(fv reflect.Value, opts, path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("field %q: value %q not in options (%s)", path, val, strings.Join(allowed, ","))
+	return pkgerrors.Newf("field %q: value %q not in options (%s)", path, val, strings.Join(allowed, ","))
 }

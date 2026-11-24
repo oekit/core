@@ -504,3 +504,22 @@ func TestOverwriteDeepCopyPointerCycle(t *testing.T) {
 		t.Fatal("shared pointer copy must not alias src")
 	}
 }
+
+func TestOverlayMerge_InterfaceDeepCopy(t *testing.T) {
+	// #189：interface 字段裸 Set 只拷接口头——动态 map 装进 any 后改 dst
+	// 元素反向污染 src。深拷贝与 slice/map 分支同口径。
+	type cfg struct {
+		Extra any
+	}
+	src := &cfg{}
+	m := map[string]any{"k": "v"}
+	src.Extra = m
+
+	var dst cfg
+	OverlayMerge(&dst, src)
+
+	dst.Extra.(map[string]any)["k2"] = "injected"
+	if _, polluted := m["k2"]; polluted {
+		t.Fatal("interface 持有的 map 被别名共享(改 dst 污染 src)")
+	}
+}

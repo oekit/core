@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	pkgerrors "github.com/oekit/pkg/errors"
 )
 
 // envPattern matches ${VAR} or ${VAR:default} placeholders.
@@ -23,8 +25,9 @@ var envPattern = regexp.MustCompile(`\$\{([^}:]+)(?::([^}]*))?\}`)
 // 替换发生在 YAML 解码**之前**，无法感知占位符所在的标量上下文，因此对会让
 // 值**静默损坏**的替换值 fail-closed 报错（不回显值本身——这类值多半是密钥）：
 // 换行/回车（双引号标量折叠为空格）、前导 `#`（整个值变注释）、` #`
-// （后半截被当注释截断）与反斜杠（core#83：双引号标量里 `\n`/`\t`/`\\` 被
-// 重新解释，值被静默改写）。含 `"` 的值在双引号标量里会破坏配对导致解析
+// （后半截被当注释截断）、前导 `&`/`*`（core#231：被解析成 YAML 锚点 /
+// 别名的标记，值被丢弃或改写）与反斜杠（core#83：双引号标量里
+// `\n`/`\t`/`\\` 被重新解释，值被静默改写）。含 `"` 的值在双引号标量里会破坏配对导致解析
 // 失败，本就 fail-closed——且该解析错误现经 wrapEnvParseError 点名 env 变量
 // （core#83 第二点）。多行证书/含注释符的 token 这类值请经 ApplyEnvOverlay
 // （结构体级注入，无文本上下文问题）传入（core#59）。
@@ -36,7 +39,7 @@ func expandEnv(data []byte) ([]byte, error) {
 		if val, ok := os.LookupEnv(key); ok {
 			if snippet, reason := yamlCorruptingSequence(val); snippet != "" {
 				if expandErr == nil {
-					expandErr = fmt.Errorf("expand ${%s}: env value contains %s — %s; refusing to load a silently corrupted config value, inject it via ApplyEnvOverlay instead", key, snippet, reason)
+					expandErr = pkgerrors.Newf("expand ${%s}: env value contains %s — %s; refusing to load a silently corrupted config value, inject it via ApplyEnvOverlay instead", key, snippet, reason)
 				}
 				return match // 报错即中止加载，占位符保留与否不影响结果
 			}
@@ -64,6 +67,17 @@ func yamlCorruptingSequence(val string) (snippet, reason string) {
 	}
 	if strings.HasPrefix(val, "#") {
 		return "a leading '#'", "YAML parses the entire value as a comment leaving the field empty"
+	}
+	if strings.HasPrefix(val, "&") {
+		// core#231：`token: ${TOKEN}` + TOKEN="&foo" → `token: &foo` 被解析成
+		// 锚点（值为 null）；"&foo secret" 被截成 secret——解析成功但值已被
+		// 重释，属于静默损坏面。
+		return "a leading '&'", "YAML parses it as an anchor name: the intended literal value is dropped or rewritten (e.g. \"&foo secret\" becomes \"secret\")"
+	}
+	if strings.HasPrefix(val, "*") {
+		// core#231：`token: ${TOKEN}` + TOKEN="*foo" → YAML 别名引用，解析
+		// 成功时取值来自锚点节点而非字面量——与锚点同族的静默重释。
+		return "a leading '*'", "YAML parses it as an alias to another node, silently replacing the literal value"
 	}
 	if strings.Contains(val, " #") {
 		return "' #'", "YAML treats everything after ' #' as a comment and truncates the value"
@@ -191,13 +205,13 @@ func wrapEnvParseError(original, expanded []byte, err error) error {
 func wrapFileError(path string, err error) error {
 	var pe *parseErr
 	if errors.As(err, &pe) {
-		return fmt.Errorf("parse config file %s: %w", path, pe)
+		return pkgerrors.Wrapf(pe, "parse config file %s", path)
 	}
 	var te *tagErr
 	if errors.As(err, &te) {
-		return fmt.Errorf("apply struct tags for config file %s: %w", path, te)
+		return pkgerrors.Wrapf(te, "apply struct tags for config file %s", path)
 	}
-	return fmt.Errorf("parse config file %s: %w", path, err)
+	return pkgerrors.Wrapf(err, "parse config file %s", path)
 }
 
 // wrapByteError 给解码错误补上字节级上下文（无路径）。透传整个分类载体，
@@ -205,11 +219,11 @@ func wrapFileError(path string, err error) error {
 func wrapByteError(err error) error {
 	var pe *parseErr
 	if errors.As(err, &pe) {
-		return fmt.Errorf("parse config: %w", pe)
+		return pkgerrors.Wrapf(pe, "parse config")
 	}
 	var te *tagErr
 	if errors.As(err, &te) {
-		return fmt.Errorf("apply struct tags: %w", te)
+		return pkgerrors.Wrapf(te, "apply struct tags")
 	}
 	return err
 }
@@ -242,7 +256,7 @@ func Unmarshal(data []byte, dst any, opts ...LoadOption) error {
 func LoadFile(path string, dst any, opts ...LoadOption) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read config file %s: %w", path, err)
+		return pkgerrors.Wrapf(err, "read config file %s", path)
 	}
 	if err := unmarshalInto(data, dst, newLoadOptions(opts)); err != nil {
 		return wrapFileError(path, err)
@@ -277,7 +291,7 @@ func LoadBootstrap[T any](envFlag string, opts ...LoadOption) (*T, error) {
 		filename = fmt.Sprintf("etc/config-%s.yaml", envFlag)
 		data, err = os.ReadFile(filename)
 		if err != nil {
-			return nil, fmt.Errorf("read config file etc/config.yaml or %s: %w", filename, err)
+			return nil, pkgerrors.Wrapf(err, "read config file etc/config.yaml or %s", filename)
 		}
 	}
 

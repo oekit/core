@@ -3,15 +3,16 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/oekit/core/internal/logkey"
+	"github.com/oekit/pkg/contextx"
 	pkgerrors "github.com/oekit/pkg/errors"
 )
 
@@ -104,8 +105,21 @@ func (m *Manager) Acquire() bool {
 
 // Release 释放请求许可。
 // 在请求处理完成后调用。
+//
+// 幂等护栏（core#190）：refCount 已归零后再调用（重复 Release / 未配对的
+// 释放）不把计数推成负数——负数会让 waitForRequests 的 `<=0` 判据把
+// 「在飞请求仍在跑」误判成「已全部排空」，Drain 提前返回、Shutdown 收尾
+// 早于真实静止。CAS 循环保证并发释放下也不越界。
 func (m *Manager) Release() {
-	m.refCount.Add(-1)
+	for {
+		cur := m.refCount.Load()
+		if cur <= 0 {
+			return
+		}
+		if m.refCount.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
 }
 
 // GetRefCount 获取当前进行中的请求数（用于监控）。
@@ -145,6 +159,17 @@ func (m *Manager) AddCloser(name string, closer interface{ Close() error }, time
 	m.Add(name, func(_ context.Context) error { return closer.Close() }, timeout)
 }
 
+// AddResourceTimeout 实现 [ResourceAdderWithTimeout]：注册一个带独立关停
+// 预算的资源（core#227）。参数顺序与 bootstrap.App.AddResourceTimeout
+// 逐字一致（name, timeout, closer），两个实现可直接互换。
+//
+// timeout 语义同 Add：>0 为该资源的独立预算；0 使用 Manager 的默认超时；
+// 默认超时也为 0 或 timeout 为负时不设超时。Manager 的 per-job 预算从
+// Background 派生、彼此隔离——单个资源超时不会挤占后续资源的预算。
+func (m *Manager) AddResourceTimeout(name string, timeout time.Duration, closer func(ctx context.Context) error) {
+	m.Add(name, closer, timeout)
+}
+
 // AddTeardown 注册一个无参数的清理函数（不接受 context，不返回 error）。
 // 关停期间注册的口径与 Add 相同（core#116）：teardown 执行期间经
 // AddTeardown 登记的函数会被本次关停补齐执行，不静默漏调。
@@ -167,6 +192,12 @@ func (m *Manager) AddTeardown(fn func()) {
 //
 // 排空时长由 SetDrainTimeout 控制（默认 30s）。
 //
+// **未显式传 signals 时的默认信号集合是 {os.Interrupt, syscall.SIGTERM}**
+// （core#231）：SIGINT 覆盖本地 Ctrl-C，SIGTERM 覆盖 K8s / 容器编排器的
+// 标准终止信号。此前默认只捕 os.Interrupt，K8s 下 SIGTERM 不触发优雅关停
+// （进程直接退出，drain / 资源反注册 / DB flush 全部不执行）。
+// 显式传入 signals 时按传入集合监听（不叠加默认值）。
+//
 // **第二枪语义覆盖两个阶段（core#142）**：① 排空期间再收到一个信号
 // （编排器连发两次 SIGTERM、运维连按两次 Ctrl-C）立即放弃等待并进入资源
 // 关闭——第二枪的语义就是「别等了，现在就关」；② **资源关闭执行期**再收到
@@ -178,7 +209,7 @@ func (m *Manager) AddTeardown(fn func()) {
 // 任务」，彻底卡死的 closer 仍需编排器 SIGKILL 兜底。
 func (m *Manager) Listen(signals ...os.Signal) {
 	if len(signals) == 0 {
-		signals = []os.Signal{os.Interrupt}
+		signals = defaultListenSignals()
 	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, signals...)
@@ -188,6 +219,13 @@ func (m *Manager) Listen(signals ...os.Signal) {
 	// SIGKILL 才能收尸。
 	defer signal.Stop(ch)
 	m.listenLoop(ch)
+}
+
+// defaultListenSignals 返回 Listen 未显式指定信号时的默认集合
+// （core#231）：Ctrl-C 的 SIGINT + 容器编排器（K8s 等）的 SIGTERM。
+// 每次调用返回新切片，调用方改写不会污染后续调用。
+func defaultListenSignals() []os.Signal {
+	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }
 
 // listenLoop 是 Listen 的心跳：等第一个信号 → 停收新请求 → 排空 → 关闭资源。
@@ -314,6 +352,9 @@ func (m *Manager) drainWithSignal(abort <-chan os.Signal) {
 // 的承诺一致）；「收到信号即跳过剩余任务」的强制语义只存在于信号驱动的
 // Listen 路径（见 Listen 第二枪语义）。
 func (m *Manager) Shutdown(ctx context.Context) {
+	// core#191：nil ctx = Background（#159 全仓口径，单源收敛到
+	// pkg/contextx.OrBackground）——nil 进 ctx.Done() 直接解引用 panic。
+	ctx = contextx.OrBackground(ctx)
 	m.once.Do(func() {
 		m.runShutdown(ctx, nil)
 	})
@@ -373,7 +414,7 @@ func (m *Manager) runShutdown(ctx context.Context, aborted <-chan struct{}) {
 			}
 			if err := m.runCloser(j, ctx); err != nil {
 				m.mu.Lock()
-				m.shutdownErrs = append(m.shutdownErrs, fmt.Errorf("%s: %w", j.name, err))
+				m.shutdownErrs = append(m.shutdownErrs, pkgerrors.Wrapf(err, "%s", j.name))
 				m.mu.Unlock()
 				m.logger.Error("resource close failed", "resource", j.name, logkey.Err, err)
 			} else {
@@ -426,7 +467,7 @@ func (m *Manager) abortShutdown(teardownDone, jobsDone *int) {
 			break
 		}
 		for _, j := range batch {
-			err := fmt.Errorf("%s: skipped, shutdown aborted by signal", j.name)
+			err := pkgerrors.Newf("%s: skipped, shutdown aborted by signal", j.name)
 			m.mu.Lock()
 			m.shutdownErrs = append(m.shutdownErrs, err)
 			m.mu.Unlock()
@@ -467,7 +508,7 @@ func pendingBatch[T any](mu *sync.Mutex, src *[]T, done *int) []T {
 func runFunc(name string, fn func()) (err error) {
 	defer func() {
 		if perr := pkgerrors.Recovered(recover()); perr != nil {
-			err = fmt.Errorf("%s: %w", name, perr)
+			err = pkgerrors.Wrapf(perr, "%s", name)
 		}
 	}()
 	fn()
@@ -479,7 +520,7 @@ func runFunc(name string, fn func()) (err error) {
 func (m *Manager) runCloser(j job, parent context.Context) (err error) {
 	defer func() {
 		if perr := pkgerrors.Recovered(recover()); perr != nil {
-			err = fmt.Errorf("%s: %w", j.name, perr)
+			err = pkgerrors.Wrapf(perr, "%s", j.name)
 		}
 	}()
 
@@ -520,6 +561,9 @@ func (m *Manager) SetDrainTimeout(d time.Duration) {
 // Drain → Shutdown），无需手工再调；只有自己编排关闭流程（如自己接管
 // signal.Notify）时才需要显式调用本方法。
 func (m *Manager) Drain(ctx context.Context) {
+	// core#191：nil ctx = Background（#159 全仓口径，单源收敛到
+	// pkg/contextx.OrBackground）。
+	ctx = contextx.OrBackground(ctx)
 	m.waitForRequests(ctx)
 }
 

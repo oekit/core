@@ -60,6 +60,15 @@ func (c *timeoutConfig) reportLate(ctx context.Context, pv *PanicError) {
 // 不受 ctx 控制的 IO 上），超时返回后其 goroutine 仍在后台运行至自然结束，
 // 本中间件无法强制中断。
 //
+// **不得放进 hertz Wrap 链（core#224）**：上述硬掐断形态（goroutine +
+// DeadlineExceeded 返回、被掐 goroutine 继续跑）进入 hertz/chainmw.Wrap
+// 链即**双写竞争**——超时后 Wrap 侧认定失败，走 mw.Fail 写 500 信封；
+// 而被弃 goroutine 里的 hertz handler 对自己已被放弃一无所知，仍继续写
+// **同一份响应缓冲**，客户端拿到哪个响应取决于两个写入的竞速。hertz 链
+// 的超时治理走 hertz/governance（只注入 deadline、不掐断，cancel 时机由
+// hertz#235 钉死）——本中间件的 goroutine 形态只适合拿返回值的链，
+// 不适合 handler 直接写响应缓冲的 hertz 面。
+//
 // 迟到结果（超时后下游才完成）的处置：
 //   - 普通结果 ⇒ 丢弃（超时胜出，既有语义不变）；
 //   - **panic ⇒ 走上报通道**（WithLatePanicReporter，缺省 stdlib slog）。

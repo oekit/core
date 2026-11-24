@@ -1,5 +1,47 @@
 
 
+## [v0.18.0] — 2026-11-21
+
+- 第三轮设计/缺陷审计（2026-11-21）core 修复：
+
+- feat: lifecycle 新增可选能力接口 ResourceAdderWithTimeout + AddResourceWithTimeout 统一注册面（能力实现走预算路径、否则回退 AddResource）——per-resource 关停预算进入接口层，消费方不必各写适配层（#227）
+- fix: lifecycle Listen 无参默认补 SIGTERM（{os.Interrupt, syscall.SIGTERM}）——此前仅捕 SIGINT，K8s 停机 SIGTERM 不触发优雅关停（#231）
+- fix: config merge 指针字段 src nil 时 overwrite 与 zeroable 同权 SetZero——远端删除配置块热更不再静默失效（#231）
+- fix: config loader YAML 标量拦截清单补前导 &/*——env 值以 & 开头不再被解析成锚点/null 静默改义（#231）
+
+关联问题单：core#227、core#231。
+
+## [v0.17.2] — 2026-11-20
+
+- docs(network): GetPodIP/GetLocalIP 消费方名单对齐实况——旧名单（uidgen/nacos/registry）是 ekit 单体时代残留且零引用，真消费方 registry/netutil 与 nns/client/register 补录（#223）
+docs(chain): Timeout godoc 补警示——硬掐断形态进 hertz/chainmw.Wrap 链会双写同一响应缓冲，hertz 链超时治理走 hertz/governance（#224）
+
+## [v0.17.1] — 2026-11-19
+
+- - refactor: lifecycle 三处手写 nil-ctx 兜底（ReadyProbe.Run/Shutdown/Drain）接 contextx.OrBackground 单源——core#159 全仓口径的收割漏网，纯机械替换无行为变化（#218）
+
+关联问题单：core#218。
+
+## [v0.17.0] — 2026-11-18
+
+- lifecycle 新增 ReadyProbe 就绪探活机制——hertz/kitex RunServer 探活骨架(5s 超时/500ms dial/100ms 重试/ErrProbeAborted #48)下沉单源,hertz/kitex 消费联动跟进(#208);config.Snapshot 与 governance.Store 内部 cell 换 container.VersionedCell 薄包装,值+代次原子发布机制单源 pkg#535(行为不变)
+
+关联问题单：core#208。
+
+## [v0.16.0] — 2026-11-18
+
+- chain.PanicError 补 Unwrap——panic(err) 业务错误身份透传,errors.Is/As 可穿透(#381 同纪律,#207)
+
+关联问题单：core#207。
+
+## [v0.15.4] — 2026-11-16
+
+- refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至 pkg v0.52.0。文案逐字节同形（测试断言零修改），多 %w/%w 居中/哨兵前置形态按仓规保留
+
+## [v0.15.3] — 2026-11-14
+
+- fix(config): growOverlaySlices 两处缺口——切片元素内部切片递归铺开 + *struct nil 按需分配下探(#187);OverlayMerge interface 走深拷贝,动态值不再别名污染(#189)(#188 同题重报已归一)
+
 ## [v0.15.2] — 2026-11-13
 
 - fix(hertzbridge): firstFoldMatch 空值穿透——多值头首枚为空串时 Get 返回首个非空值，违反「Get=首值」契约（#164）。命中判定改独立 found 标志；godoc 补空首值不让位说明；补多值含空串回归测试（Get/Values/Keys 三方对齐）。pkg 地板 v0.47.1。
